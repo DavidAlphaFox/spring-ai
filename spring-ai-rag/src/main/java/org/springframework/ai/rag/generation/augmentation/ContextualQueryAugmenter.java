@@ -35,6 +35,28 @@ import org.springframework.util.Assert;
  * Augments the user query with contextual data from the content of the provided
  * documents.
  *
+ * <h2>定位</h2>
+ * <p>
+ * Spring AI 提供的<b>默认 {@link QueryAugmenter} 实现</b>。它把检索得到的文档拼成
+ * "上下文块"塞进一个固定结构的 PromptTemplate，最终输出形如：
+ * <pre>
+ * Context information is below.
+ * ---------------------
+ * &lt;文档1 文本&gt;
+ * &lt;文档2 文本&gt;
+ * ---------------------
+ * Given the context information and no prior knowledge, answer the query.
+ * ……
+ * Query: &lt;原始问题&gt;
+ * Answer:
+ * </pre>
+ *
+ * <h2>对"幻觉"的防御</h2>
+ * <p>
+ * 默认模板里明确指示模型：<i>only based on context, no prior knowledge</i>，并要求
+ * 不知道就答"不知道"。这是 RAG 项目降低幻觉率的关键工程实践——通过 Prompt 明示
+ * "只用提供的上下文回答"。
+ *
  * <p>
  * Example usage: <pre>{@code
  * QueryAugmenter augmenter = ContextualQueryAugmenter.builder()
@@ -50,6 +72,7 @@ public final class ContextualQueryAugmenter implements QueryAugmenter {
 
 	private static final Logger logger = LoggerFactory.getLogger(ContextualQueryAugmenter.class);
 
+	/** 默认增强模板：要求模型仅基于上下文作答，是 RAG 防幻觉的标准范式。 */
 	private static final PromptTemplate DEFAULT_PROMPT_TEMPLATE = new PromptTemplate("""
 			Context information is below.
 
@@ -69,15 +92,20 @@ public final class ContextualQueryAugmenter implements QueryAugmenter {
 			Answer:
 			""");
 
+	/** 当文档检索为空且不允许空上下文时使用的兜底模板：礼貌地告知用户问题超出知识库。 */
 	private static final PromptTemplate DEFAULT_EMPTY_CONTEXT_PROMPT_TEMPLATE = new PromptTemplate("""
 			The user query is outside your knowledge base.
 			Politely inform the user that you can't answer it.
 			""");
 
+	/** 默认<b>不允许</b>空上下文——避免模型在没有依据时凭空作答（幻觉）。 */
 	private static final boolean DEFAULT_ALLOW_EMPTY_CONTEXT = false;
 
 	/**
-	 * Default document formatter that just joins document text with newlines
+	 * Default document formatter that just joins document text with newlines.
+	 * <p>
+	 * 默认文档拼接策略：把每个 Document 的纯文本用换行连成一段。如有需要（例如要带文档元数据、来源 URL），
+	 * 可通过 Builder 注入自定义格式化函数。
 	 */
 	private static final Function<List<Document>, String> DEFAULT_DOCUMENT_FORMATTER = documents -> documents.stream()
 		.map(Document::getText)
@@ -109,20 +137,28 @@ public final class ContextualQueryAugmenter implements QueryAugmenter {
 
 		logger.debug("Augmenting query with contextual data");
 
+		// 空上下文走兜底分支：要么放行原查询，要么改写为"知识库外"提示。
 		if (documents.isEmpty()) {
 			return augmentQueryWhenEmptyContext(query);
 		}
 
-		// 1. Collect content from documents.
+		// 1. 把文档列表格式化成一段连续文本（默认换行拼接）。
 		String documentContext = this.documentFormatter.apply(documents);
 
-		// 2. Define prompt parameters.
+		// 2. 准备模板参数：{query} = 原始问题，{context} = 拼好的文档上下文。
 		Map<String, Object> promptParameters = Map.of("query", query.text(), "context", documentContext);
 
-		// 3. Augment user prompt with document context.
+		// 3. 渲染模板，得到"含上下文 + 用户问题"的最终 prompt 文本，包装成新的 Query 返回。
 		return new Query(this.promptTemplate.render(promptParameters));
 	}
 
+	/**
+	 * 处理"<b>检索为空</b>"的情况：根据 {@link #allowEmptyContext} 决定走哪一支。
+	 * <ul>
+	 *   <li>true：直接返回原始 Query，让模型用自有知识回答（适合作为兜底但有幻觉风险）；</li>
+	 *   <li>false（默认）：用 {@link #emptyContextPromptTemplate} 渲染出一个"礼貌拒答"的提示。</li>
+	 * </ul>
+	 */
 	private Query augmentQueryWhenEmptyContext(Query query) {
 		if (this.allowEmptyContext) {
 			logger.debug("Empty context is allowed. Returning the original query.");
