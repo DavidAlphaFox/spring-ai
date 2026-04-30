@@ -20,42 +20,50 @@ import java.util.Collections;
 import java.util.Map;
 
 /**
- * Represents the context for tool execution in a function calling scenario.
+ * 工具调用（function calling）执行时的上下文（Tool Context）。
  *
  * <p>
- * This class encapsulates a map of contextual information that can be passed to tools
- * (functions) when they are called. It provides an immutable view of the context to
- * ensure thread-safety and prevent modification after creation.
- * </p>
+ * 在 Spring AI 的工具调用流程中，模型可以请求执行某个用户定义的函数 / 工具。
+ * 但工具的具体逻辑往往需要一些「请求级」的额外信息（如当前用户 ID、租户、
+ * 追踪 ID、缓存 key 等），这些信息既不应硬编码在工具实现中，也不适合作为
+ * 模型可见的入参暴露给 LLM。
  *
  * <p>
- * The context is typically populated from the {@code toolContext} field of
- * {@code ToolCallingChatOptions} and is used in the function execution process.
- * </p>
+ * {@code ToolContext} 就是为这种场景设计的：调用方在构造
+ * {@code ToolCallingChatOptions} 时通过 {@code toolContext} 字段传入一个
+ * {@link Map}，框架在执行工具回调时再以 {@code ToolContext} 形式注入到工具实现中，
+ * 工具内部即可读取这些键值对而无需经过模型。
  *
  * <p>
- * The context map can contain any information that is relevant to the tool execution.
- * </p>
+ * 实例为<b>不可变</b>对象：构造时通过 {@link Collections#unmodifiableMap} 对底层
+ * Map 做了只读包装，对外只暴露读视图，从而保证多线程环境下安全共享。
+ *
+ * <p>
+ * 上下文 Map 中可放入任何与工具执行相关的信息，键值含义由调用方与工具实现共同约定。
  *
  * @author Christian Tzolov
  * @since 1.0.0
  */
 public final class ToolContext {
 
+	/** 只读视图下的上下文键值对集合，构造后不可修改。 */
 	private final Map<String, Object> context;
 
 	/**
-	 * Constructs a new ToolContext with the given context map.
-	 * @param context A map containing the tool context information. This map is wrapped
-	 * in an unmodifiable view to prevent changes.
+	 * 使用给定 Map 构造一个 {@code ToolContext}，并对其做不可变包装。
+	 * <p>
+	 * 注意：此处仅做 {@code unmodifiableMap} 包装，并非深拷贝，因此外部如果继续
+	 * 持有原始 Map 引用并修改它，包装视图也会观察到变化。如需彻底隔离，调用方
+	 * 应自行传入一份不可变副本。
+	 * @param context 工具上下文键值对
 	 */
 	public ToolContext(Map<String, Object> context) {
 		this.context = Collections.unmodifiableMap(context);
 	}
 
 	/**
-	 * Returns the immutable context map.
-	 * @return An unmodifiable view of the context map.
+	 * 返回不可变的上下文 Map 视图，工具实现可从中读取调用方注入的运行时数据。
+	 * @return 不可修改的 {@link Map} 视图
 	 */
 	public Map<String, Object> getContext() {
 		return this.context;
