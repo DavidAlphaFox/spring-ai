@@ -22,13 +22,12 @@ import java.util.stream.Collectors;
 
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 import reactor.core.publisher.Flux;
 
 import org.springframework.ai.chat.client.ChatClient;
 import org.springframework.ai.chat.client.advisor.MessageChatMemoryAdvisor;
 import org.springframework.ai.chat.client.advisor.ToolCallAdvisor;
+import org.springframework.ai.chat.memory.ChatMemory;
 import org.springframework.ai.chat.memory.MessageWindowChatMemory;
 import org.springframework.ai.chat.model.ChatModel;
 import org.springframework.ai.tool.ToolCallback;
@@ -48,8 +47,6 @@ import static org.assertj.core.api.Assertions.assertThat;
  * @author Christian Tzolov
  */
 public abstract class AbstractToolCallAdvisorIT {
-
-	protected final Logger logger = LoggerFactory.getLogger(getClass());
 
 	/**
 	 * Returns the ChatModel instance to be used in tests.
@@ -90,11 +87,9 @@ public abstract class AbstractToolCallAdvisorIT {
 				.prompt()
 				.advisors(ToolCallAdvisor.builder().build())
 				.user(u -> u.text("What's the weather like in San Francisco, Tokyo, and Paris in Celsius?"))
-				.toolCallbacks(createWeatherToolCallback())
+				.tools(createWeatherToolCallback())
 				.call()
 				.content();
-
-			logger.info("Response: {}", response);
 
 			assertThat(response).contains("30", "10", "15");
 		}
@@ -108,11 +103,10 @@ public abstract class AbstractToolCallAdvisorIT {
 						MessageChatMemoryAdvisor.builder(MessageWindowChatMemory.builder().maxMessages(500).build())
 							.build())
 				.user(u -> u.text("What's the weather like in San Francisco, Tokyo, and Paris in Celsius?"))
-				.toolCallbacks(createWeatherToolCallback())
+				.tools(createWeatherToolCallback())
+				.advisors(a -> a.param(ChatMemory.CONVERSATION_ID, "call-default-advisor-with-memory"))
 				.call()
 				.content();
-
-			logger.info("Response: {}", response);
 
 			assertThat(response).contains("30", "10", "15");
 		}
@@ -126,11 +120,9 @@ public abstract class AbstractToolCallAdvisorIT {
 
 			String response = chatClient.prompt()
 				.user("What's the weather like in San Francisco, Tokyo, and Paris in Celsius?")
-				.toolCallbacks(createWeatherToolCallback())
+				.tools(createWeatherToolCallback())
 				.call()
 				.content();
-
-			logger.info("Response: {}", response);
 
 			assertThat(response).contains("30", "10", "15");
 		}
@@ -145,11 +137,10 @@ public abstract class AbstractToolCallAdvisorIT {
 
 			String response = chatClient.prompt()
 				.user("What's the weather like in San Francisco, Tokyo, and Paris in Celsius?")
-				.toolCallbacks(createWeatherToolCallback())
+				.tools(createWeatherToolCallback())
+				.advisors(a -> a.param(ChatMemory.CONVERSATION_ID, "call-default-advisor-with-memory"))
 				.call()
 				.content();
-
-			logger.info("Response: {}", response);
 
 			assertThat(response).contains("30", "10", "15");
 		}
@@ -160,11 +151,9 @@ public abstract class AbstractToolCallAdvisorIT {
 				.prompt()
 				.advisors(ToolCallAdvisor.builder().build())
 				.user("What's the weather like in Tokyo?")
-				.toolCallbacks(createReturnDirectWeatherToolCallback())
+				.tools(createReturnDirectWeatherToolCallback())
 				.call()
 				.content();
-
-			logger.info("Response: {}", response);
 
 			// With returnDirect=true, the raw tool result is returned without LLM
 			// processing
@@ -183,13 +172,12 @@ public abstract class AbstractToolCallAdvisorIT {
 				.prompt()
 				.advisors(ToolCallAdvisor.builder().build())
 				.user("What's the weather like in San Francisco, Tokyo, and Paris in Celsius?")
-				.toolCallbacks(createWeatherToolCallback())
+				.tools(createWeatherToolCallback())
 				.stream()
 				.content();
 
 			List<String> chunks = response.collectList().block();
 			String content = Objects.requireNonNull(chunks).stream().collect(Collectors.joining());
-			logger.info("Response: {}", content);
 
 			assertThat(content).contains("30", "10", "15");
 		}
@@ -203,13 +191,13 @@ public abstract class AbstractToolCallAdvisorIT {
 						MessageChatMemoryAdvisor.builder(MessageWindowChatMemory.builder().maxMessages(500).build())
 							.build())
 				.user("What's the weather like in San Francisco, Tokyo, and Paris in Celsius?")
-				.toolCallbacks(createWeatherToolCallback())
+				.tools(createWeatherToolCallback())
+				.advisors(a -> a.param(ChatMemory.CONVERSATION_ID, "call-default-advisor-with-memory"))
 				.stream()
 				.content();
 
 			List<String> chunks = response.collectList().block();
 			String content = Objects.requireNonNull(chunks).stream().collect(Collectors.joining());
-			logger.info("Response: {}", content);
 
 			assertThat(content).contains("30", "10", "15");
 		}
@@ -223,13 +211,12 @@ public abstract class AbstractToolCallAdvisorIT {
 
 			Flux<String> response = chatClient.prompt()
 				.user("What's the weather like in San Francisco, Tokyo, and Paris in Celsius?")
-				.toolCallbacks(createWeatherToolCallback())
+				.tools(createWeatherToolCallback())
 				.stream()
 				.content();
 
 			List<String> chunks = response.collectList().block();
 			String content = Objects.requireNonNull(chunks).stream().collect(Collectors.joining());
-			logger.info("Response: {}", content);
 
 			assertThat(content).contains("30", "10", "15");
 		}
@@ -244,13 +231,13 @@ public abstract class AbstractToolCallAdvisorIT {
 
 			Flux<String> response = chatClient.prompt()
 				.user("What's the weather like in San Francisco, Tokyo, and Paris in Celsius?")
-				.toolCallbacks(createWeatherToolCallback())
+				.tools(createWeatherToolCallback())
+				.advisors(a -> a.param(ChatMemory.CONVERSATION_ID, "call-default-advisor-with-memory"))
 				.stream()
 				.content();
 
 			List<String> chunks = response.collectList().block();
 			String content = Objects.requireNonNull(chunks).stream().collect(Collectors.joining());
-			logger.info("Response: {}", content);
 
 			assertThat(content).contains("30", "10", "15");
 		}
@@ -261,13 +248,12 @@ public abstract class AbstractToolCallAdvisorIT {
 				.prompt()
 				.advisors(ToolCallAdvisor.builder().build())
 				.user("What's the weather like in Tokyo?")
-				.toolCallbacks(createReturnDirectWeatherToolCallback())
+				.tools(createReturnDirectWeatherToolCallback())
 				.stream()
 				.content();
 
 			List<String> chunks = response.collectList().block();
 			String content = Objects.requireNonNull(chunks).stream().collect(Collectors.joining());
-			logger.info("Response: {}", content);
 
 			// With returnDirect=true, the raw tool result is returned without LLM
 			// processing

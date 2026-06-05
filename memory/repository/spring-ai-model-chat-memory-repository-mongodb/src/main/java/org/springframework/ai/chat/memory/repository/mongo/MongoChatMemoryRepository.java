@@ -19,11 +19,10 @@ package org.springframework.ai.chat.memory.repository.mongo;
 import java.time.Instant;
 import java.util.List;
 import java.util.Objects;
-import java.util.stream.Collectors;
 
+import org.apache.commons.logging.Log;
+import org.apache.commons.logging.LogFactory;
 import org.jspecify.annotations.Nullable;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 
 import org.springframework.ai.chat.memory.ChatMemoryRepository;
 import org.springframework.ai.chat.messages.AssistantMessage;
@@ -44,7 +43,7 @@ import org.springframework.util.Assert;
  */
 public final class MongoChatMemoryRepository implements ChatMemoryRepository {
 
-	private static final Logger logger = LoggerFactory.getLogger(MongoChatMemoryRepository.class);
+	private static final Log logger = LogFactory.getLog(MongoChatMemoryRepository.class);
 
 	private final MongoTemplate mongoTemplate;
 
@@ -62,7 +61,7 @@ public final class MongoChatMemoryRepository implements ChatMemoryRepository {
 		var messages = this.mongoTemplate.query(Conversation.class)
 			.matching(Query.query(Criteria.where("conversationId").is(conversationId))
 				.with(Sort.by("timestamp").ascending()));
-		return messages.stream().map(MongoChatMemoryRepository::mapMessage).collect(Collectors.toList());
+		return messages.stream().map(MongoChatMemoryRepository::mapMessage).toList();
 	}
 
 	@Override
@@ -90,7 +89,9 @@ public final class MongoChatMemoryRepository implements ChatMemoryRepository {
 				AssistantMessage.builder().content(content).properties(conversation.message().metadata()).build();
 			case "SYSTEM" -> SystemMessage.builder().text(content).metadata(conversation.message().metadata()).build();
 			default -> {
-				logger.warn("Unsupported message type: {}", conversation.message().type());
+				if (logger.isWarnEnabled()) {
+					logger.warn("Unsupported message type: " + conversation.message().type());
+				}
 				throw new IllegalStateException("Unsupported message type: " + conversation.message().type());
 			}
 		};

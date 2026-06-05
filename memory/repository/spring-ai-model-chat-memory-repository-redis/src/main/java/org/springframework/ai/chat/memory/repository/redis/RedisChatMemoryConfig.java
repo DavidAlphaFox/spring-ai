@@ -22,7 +22,7 @@ import java.util.List;
 import java.util.Map;
 
 import org.jspecify.annotations.Nullable;
-import redis.clients.jedis.JedisPooled;
+import redis.clients.jedis.RedisClient;
 
 import org.springframework.util.Assert;
 
@@ -30,8 +30,9 @@ import org.springframework.util.Assert;
  * Configuration class for RedisChatMemoryRepository.
  *
  * @author Brian Sam-Bodden
+ * @author Yanming Zhou
  */
-public class RedisChatMemoryConfig {
+public final class RedisChatMemoryConfig {
 
 	public static final String DEFAULT_INDEX_NAME = "chat-memory-idx";
 
@@ -44,7 +45,7 @@ public class RedisChatMemoryConfig {
 	public static final int DEFAULT_MAX_RESULTS = 1000;
 
 	/** The Redis client */
-	private final JedisPooled jedisClient;
+	private final RedisClient jedisClient;
 
 	/** The index name for Redis Search */
 	private final String indexName;
@@ -75,7 +76,7 @@ public class RedisChatMemoryConfig {
 	private final List<Map<String, String>> metadataFields;
 
 	private RedisChatMemoryConfig(final Builder builder) {
-		Assert.notNull(builder.jedisClient, "JedisPooled client must not be null");
+		Assert.notNull(builder.jedisClient, "RedisClient client must not be null");
 		Assert.hasText(builder.indexName, "Index name must not be empty");
 		Assert.hasText(builder.keyPrefix, "Key prefix must not be empty");
 
@@ -93,24 +94,24 @@ public class RedisChatMemoryConfig {
 		return new Builder();
 	}
 
-	public JedisPooled getJedisClient() {
-		return jedisClient;
+	public RedisClient getJedisClient() {
+		return this.jedisClient;
 	}
 
 	public String getIndexName() {
-		return indexName;
+		return this.indexName;
 	}
 
 	public String getKeyPrefix() {
-		return keyPrefix;
+		return this.keyPrefix;
 	}
 
 	public Integer getTimeToLiveSeconds() {
-		return timeToLiveSeconds;
+		return this.timeToLiveSeconds;
 	}
 
 	public boolean isInitializeSchema() {
-		return initializeSchema;
+		return this.initializeSchema;
 	}
 
 	/**
@@ -118,7 +119,7 @@ public class RedisChatMemoryConfig {
 	 * @return maximum number of conversation IDs
 	 */
 	public int getMaxConversationIds() {
-		return maxConversationIds;
+		return this.maxConversationIds;
 	}
 
 	/**
@@ -126,7 +127,7 @@ public class RedisChatMemoryConfig {
 	 * @return maximum number of messages per conversation
 	 */
 	public int getMaxMessagesPerConversation() {
-		return maxMessagesPerConversation;
+		return this.maxMessagesPerConversation;
 	}
 
 	/**
@@ -134,7 +135,7 @@ public class RedisChatMemoryConfig {
 	 * @return list of metadata field definitions in RedisVL-compatible format
 	 */
 	public List<Map<String, String>> getMetadataFields() {
-		return metadataFields;
+		return this.metadataFields;
 	}
 
 	/**
@@ -143,7 +144,7 @@ public class RedisChatMemoryConfig {
 	public static class Builder {
 
 		/** The Redis client */
-		private @Nullable JedisPooled jedisClient;
+		private @Nullable RedisClient jedisClient;
 
 		/** The index name */
 		private String indexName = DEFAULT_INDEX_NAME;
@@ -171,7 +172,7 @@ public class RedisChatMemoryConfig {
 		 * @param jedisClient the Redis client to use
 		 * @return the builder instance
 		 */
-		public Builder jedisClient(final JedisPooled jedisClient) {
+		public Builder jedisClient(final RedisClient jedisClient) {
 			this.jedisClient = jedisClient;
 			return this;
 		}

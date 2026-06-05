@@ -31,15 +31,6 @@
 	<description>Spring AI PDF document reader</description>
 	<url>https://github.com/spring-projects/spring-ai</url>
 
-	<scm>
-		<url>https://github.com/spring-projects/spring-ai</url>
-		<connection>scm:git:git://github.com/spring-projects/spring-ai.git</connection>
-		<developerConnection>scm:git:ssh://git@github.com/spring-projects/spring-ai.git</developerConnection>
-	</scm>
-
-	<properties>
-	</properties>
-
 	<dependencies>
 		<dependency>
 			<groupId>org.springframework.ai</groupId>
@@ -57,12 +48,6 @@
 					<artifactId>commons-logging</artifactId>
 				</exclusion>
 			</exclusions>
-		</dependency>
-
-		<dependency>
-			<groupId>org.slf4j</groupId>
-			<artifactId>slf4j-api</artifactId>
-			<optional>true</optional>
 		</dependency>
 
 		<!-- TESTING -->

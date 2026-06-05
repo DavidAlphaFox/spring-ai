@@ -1,6 +1,819 @@
 [[upgrade-notes]]
 = Upgrade Notes
 
+[[upgrading-to-2-0-0-RC1]]
+== Upgrading to 2.0.0-RC1
+
+=== Tool Calling
+
+==== Removed: `internalToolExecutionEnabled` from `ToolCallingChatOptions`
+
+The `internalToolExecutionEnabled` option has been removed from `ToolCallingChatOptions` and all provider-specific `ChatOptions` classes (e.g. `OpenAiChatOptions`, `AnthropicChatOptions`). The corresponding Spring Boot configuration property `spring.ai.<provider>.chat.internal-tool-execution-enabled` has also been removed.
+
+===== Impact
+
+Code that sets `.internalToolExecutionEnabled(false)` to opt into user-controlled tool execution will no longer compile.
+Code that sets `.internalToolExecutionEnabled(true)` (explicitly enabling the internal loop) will no longer compile, and the behaviour it implied no longer exists — per-model internal tool execution has been removed from all `ChatModel` implementations.
+
+===== Migration
+
+Remove all calls to `.internalToolExecutionEnabled(...)`. The recommended approaches are:
+
+* **`ToolCallAdvisor` via `ChatClient`** (recommended) — auto-registered when tools are present; no flag needed.
+* **User-controlled loop via `ChatModel` directly** — simply invoke `ChatModel` without `ToolCallAdvisor`. Tool calls will not be executed automatically; check `chatResponse.hasToolCalls()` yourself and drive the loop with `ToolCallingManager`.
+
+[source,java]
+----
+// Before
+ChatOptions options = ToolCallingChatOptions.builder()
+    .toolCallbacks(ToolCallbacks.from(new MyTools()))
+    .internalToolExecutionEnabled(false)   // <-- remove this line
+    .build();
+
+// After
+ChatOptions options = ToolCallingChatOptions.builder()
+    .toolCallbacks(ToolCallbacks.from(new MyTools()))
+    .build();
+----
+
+==== Removed: `ToolExecutionEligibilityPredicate` and `DefaultToolExecutionEligibilityPredicate`
+
+`ToolExecutionEligibilityPredicate` (previously deprecated since 2.0.0) and its default implementation `DefaultToolExecutionEligibilityPredicate` have been removed. These interfaces combined an options-based policy check (`internalToolExecutionEnabled`) with a response check (`hasToolCalls()`). Since the options-based flag is gone, there is no replacement at the `ChatModel` level.
+
+===== Migration
+
+If you implemented `ToolExecutionEligibilityPredicate` to customize when tool execution fires, migrate to `ToolExecutionEligibilityChecker` (see below) and supply it to `ToolCallAdvisor`.
+
+==== New: `ToolExecutionEligibilityChecker` in `ToolCallAdvisor`
+
+`ToolExecutionEligibilityChecker` (`Function<ChatResponse, Boolean>`) can now be set on `ToolCallAdvisor.Builder` to customize when the tool-call loop iterates. The default is `chatResponse -> chatResponse != null && chatResponse.hasToolCalls()`.
+
+This is the extension point for provider-specific stop-reason logic (e.g. checking a finish reason in addition to tool-call presence):
+
+[source,java]
+----
+ToolCallAdvisor advisor = ToolCallAdvisor.builder()
+    .toolExecutionEligibilityChecker(response ->
+        response != null && response.hasToolCalls()
+            && !"stop".equals(response.getResult().getMetadata().getFinishReason()))
+    .build();
+----
+
+Spring Boot users can provide a `ToolExecutionEligibilityChecker` bean; it will be picked up automatically by the auto-configured `ToolCallAdvisor.Builder`:
+
+[source,java]
+----
+@Bean
+ToolExecutionEligibilityChecker myChecker() {
+    return response -> response != null && response.hasToolCalls();
+}
+----
+
+==== New: `spring.ai.chat.client.tool-calling.enabled` Property
+
+A new `spring.ai.chat.client.tool-calling.enabled` property (default `true`) controls whether the `ToolCallAdvisor` is auto-registered by the auto-configured `ChatClient`.
+Set it to `false` to disable automatic tool execution for all calls — tools are still sent to the AI model as definitions, but tool call responses are not executed automatically.
+
+[source,properties]
+----
+spring.ai.chat.client.tool-calling.enabled=false
+----
+
+This is a global alternative to using `AdvisorParams.toolCallAdvisorAutoRegister(false)` on every individual call.
+
+=== JDBC Chat Memory `sequence_id` Column
+
+The `JdbcChatMemoryRepository` schema adds a `sequence_id BIGINT` column that determines message ordering within a conversation. Previously, ordering relied on the `timestamp` column, but `TIMESTAMP` precision differs across databases — on MySQL and MariaDB the default precision is one second, so messages saved within the same second were returned in a non-deterministic order. A dedicated integer sequence orders identically across every supported database.
+
+The `timestamp` column is retained. It now stores the message creation time and is exposed in the message metadata under the `JdbcChatMemoryRepository.CONVERSATION_TS` key (a `java.time.Instant`), so applications can display when a message was created. The timestamp is preserved across saves: re-saving a conversation keeps each existing message's original creation time.
+
+===== Impact
+
+- The `SPRING_AI_CHAT_MEMORY` table gains a `sequence_id` column (`BIGINT`, or `NUMBER(19)` on Oracle and `INTEGER` on SQLite) and a `SPRING_AI_CHAT_MEMORY_CONVERSATION_ID_SEQUENCE_ID_IDX` index. The `timestamp` column and its index are unchanged.
+- Existing tables created by Spring AI 1.x require the new column before they will work, since messages are now ordered by `sequence_id`.
+- Messages read from the repository now carry their creation timestamp in metadata. Because the metadata differs, a retrieved message is no longer equal (`Message.equals`) to an otherwise-identical message constructed in code. Code that compares messages by value, or relies on message identity in sets or maps, should account for this.
+
+===== Migration
+
+The change is additive: add the new column and backfill it from the existing per-conversation order. No data is lost and the `timestamp` column is untouched. For PostgreSQL:
+
+[source,sql]
+----
+ALTER TABLE SPRING_AI_CHAT_MEMORY ADD COLUMN sequence_id BIGINT;
+
+WITH ordered AS (
+    SELECT ctid, ROW_NUMBER() OVER (PARTITION BY conversation_id ORDER BY "timestamp") - 1 AS seq
+    FROM SPRING_AI_CHAT_MEMORY
+)
+UPDATE SPRING_AI_CHAT_MEMORY t
+SET sequence_id = o.seq
+FROM ordered o
+WHERE t.ctid = o.ctid;
+
+ALTER TABLE SPRING_AI_CHAT_MEMORY ALTER COLUMN sequence_id SET NOT NULL;
+
+CREATE INDEX SPRING_AI_CHAT_MEMORY_CONVERSATION_ID_SEQUENCE_ID_IDX
+ON SPRING_AI_CHAT_MEMORY(conversation_id, sequence_id);
+----
+
+Adapt the identifier quoting and the row-identity expression (`ctid` above) to your database. The `ROW_NUMBER() OVER (PARTITION BY conversation_id ORDER BY <timestamp>)` pattern reproduces the existing per-conversation order on every supported engine. Alternatively, since chat memory holds recent conversation context rather than permanent history, you can drop and recreate the table from the updated `schema-<platform>.sql` script.
+
+=== Options Immutability and Default Values
+
+==== Strict Immutability for Options
+
+Options classes (like `ChatOptions`, `EmbeddingOptions`, etc.) are now strictly immutable.
+Collections within options (like `toolCallbacks`, `stopSequences`, `customHeaders`) are now stored as unmodifiable collections.
+Additionally, nullable collections are now used instead of empty ones to better represent the absence of a value.
+
+===== Impact
+
+- `ChatOptions#copy()` and `*Options#fromOptions(*Options)` methods have been removed because options are now strictly immutable.
+- Modifying collections returned by options getters will throw an `UnsupportedOperationException`.
+
+===== Migration
+
+To create a modified copy of an options instance, use the `mutate()` method instead of `copy()` or `fromOptions()`:
+
+[source,java]
+----
+// Before
+OllamaChatOptions options = originalOptions.copy();
+options.setFoo("...");
+
+// After
+OllamaChatOptions options = originalOptions.mutate()
+        .foo("...")
+        .build();
+----
+
+==== Default Values Moved to Options Constructors
+
+Default values for options (like default model names, temperatures, etc.) have been moved from the `Model` implementations and `*Properties` configuration classes to the options constructors themselves.
+Default configuration properties in `*Properties` classes have been removed as they are no longer needed and should be consistent with the options-level defaults.
+
+===== Impact
+
+- `ChatModel#getDefaultOptions()` is deprecated in favor of `ChatModel#getOptions()`.
+- Default values are no longer duplicated in `*Properties` classes.
+
+===== Migration
+
+Use `getOptions()` instead of `getDefaultOptions()` when retrieving the default options for a model:
+
+[source,java]
+----
+// Before
+ChatOptions options = chatModel.getDefaultOptions();
+
+// After
+ChatOptions options = chatModel.getOptions();
+----
+
+==== Configuration Properties Flattening
+
+Building on the changes introduced in 2.0.0-M6 for Chat models, the configuration properties for all other models (Embedding, Image, Audio, Moderation, OCR, etc.) no longer use the `.options` prefix. 
+For example, the former `spring.ai.openai.embedding.options.model` is now `spring.ai.openai.embedding.model`.
+Deprecated configuration properties are provided for the `.options` variants to ensure a smoother migration experience.
+
+===== Impact
+
+- The `getOptions()` method in `*Properties` classes is deprecated.
+- The nested `Options` classes within `*Properties` are deprecated.
+- The `toOptions()` method has been moved from the nested `Options` class to the root `*Properties` class.
+
+===== Migration
+
+Update your `application.properties` or `application.yml` to remove the `.options` segment from the property keys.
+
+[source,properties]
+----
+# Before
+spring.ai.openai.embedding.options.model=text-embedding-3-small
+
+# After
+spring.ai.openai.embedding.model=text-embedding-3-small
+----
+
+In Java code, use the root properties class directly to access options or call `toOptions()`:
+
+[source,java]
+----
+// Before
+String model = properties.getOptions().getModel();
+OpenAiEmbeddingOptions options = properties.getOptions().toOptions();
+
+// After
+String model = properties.getModel();
+OpenAiEmbeddingOptions options = properties.toOptions();
+----
+
+==== Renamed `N()` to `n()` in Options Builders
+
+The `N()` builder method in various `*Options` and configuration properties classes has been renamed to `n()` to align with Java naming conventions.
+
+===== Impact
+
+- Any Java code calling `.N(value)` on these builders will fail to compile.
+
+===== Migration
+
+Update your code to call `.n(value)` instead.
+
+[source,java]
+----
+// Before
+OpenAiChatOptions.builder().N(1).build();
+
+// After
+OpenAiChatOptions.builder().n(1).build();
+----
+
+=== Minimax dedicated support superseded by Anthropic support
+
+Minimax dedicated support has been removed in favor of using Anthropic support as recommended by https://platform.minimax.io/docs/api-reference/text-anthropic-api[Minimax themselves].
+Please use the Spring AI Anthropic support instead, configuring it with the `\https://api.minimax.io/anthropic` base URL and MiniMax models.
+Embeddings are not support anymore.
+
+
+=== JSON Utilities Refactoring
+
+==== New: `JsonHelper` and Updated `JacksonUtils`
+
+A new `JsonHelper` class has been introduced in `spring-ai-commons` as the canonical way to perform JSON serialization and deserialization.
+It is instantiable and accepts a custom `JsonMapper`, making it straightforward to customize JSON behavior per use case.
+`JacksonUtils` gains a new `getDefaultJsonMapper()` static method that returns a shared, pre-configured `JsonMapper` instance.
+
+`JsonHelper` centralizes JSON operations previously spread across `JsonParser`, `ModelOptionsUtils`, and `McpJsonParser`.
+The default constructor uses the shared mapper from `JacksonUtils.getDefaultJsonMapper()`.
+Inject a custom `JsonMapper` if you need different serialization settings:
+
+[source,java]
+----
+// Default — uses the shared JsonMapper from JacksonUtils
+JsonHelper jsonHelper = new JsonHelper();
+
+// Custom — supply your own JsonMapper
+JsonMapper myMapper = JsonMapper.builder()
+    .addModule(new JavaTimeModule())
+    .build();
+JsonHelper customHelper = new JsonHelper(myMapper);
+----
+
+==== Deprecated: `JsonParser`
+
+`JsonParser` (in `org.springframework.ai.util.json`) is deprecated for removal. All methods now delegate to `JsonHelper`.
+
+===== Impact
+
+Code that calls `JsonParser` methods will see deprecation warnings at compile time.
+
+===== Migration
+
+[cols="1,1", options="header"]
+|===
+| Before | After
+| `JsonParser.getJsonMapper()` | `JacksonUtils.getDefaultJsonMapper()`
+| `JsonParser.fromJson(json, MyType.class)` | `jsonHelper.fromJson(json, MyType.class)`
+| `JsonParser.fromJson(json, type)` | `jsonHelper.fromJson(json, type)`
+| `JsonParser.toJson(object)` | `jsonHelper.toJson(object)`
+| `JsonParser.toTypedObject(value, type)` | `jsonHelper.convertToTypedObject(value, type)`
+|===
+
+==== Removed: JSON Methods from `ModelOptionsUtils`
+
+The following members of `ModelOptionsUtils` have been removed, since model options no longer depend on Jackson directly.
+
+[cols="1,1", options="header"]
+|===
+| Removed member | Replacement
+| `ModelOptionsUtils.JSON_MAPPER` | `JacksonUtils.getDefaultJsonMapper()`
+| `ModelOptionsUtils.jsonToMap(String)` | `jsonHelper.fromJsonToMap(json)`
+| `ModelOptionsUtils.jsonToObject(String, Class<T>)` | `jsonHelper.fromJson(json, type)`
+| `ModelOptionsUtils.toJsonString(Object)` | `jsonHelper.toJson(object)`
+| `ModelOptionsUtils.toJsonStringPrettyPrinter(Object)` | `JacksonUtils.getDefaultJsonMapper().writerWithDefaultPrettyPrinter().writeValueAsString(object)`
+| `ModelOptionsUtils.getJsonSchema(Type, boolean)` | `JsonSchemaUtils.getJsonSchema(type, toUpperCase)`
+| `ModelOptionsUtils.getJsonSchema(Type)` | `JsonSchemaUtils.getJsonSchema(type)`
+| `ModelOptionsUtils.toUpperCaseTypeValues(ObjectNode)` | `JsonSchemaUtils.toUpperCaseTypeValues(node)`
+|===
+
+===== Impact
+
+Code that references the removed fields or methods will fail to compile.
+
+===== Migration
+
+[source,java]
+----
+// Before
+import org.springframework.ai.model.ModelOptionsUtils;
+
+Map<String, Object> map = ModelOptionsUtils.jsonToMap(jsonString);
+String json = ModelOptionsUtils.toJsonString(myObject);
+JsonMapper mapper = ModelOptionsUtils.JSON_MAPPER;
+
+// After
+import org.springframework.ai.util.JsonHelper;
+import org.springframework.ai.util.JacksonUtils;
+
+private static final JsonHelper jsonHelper = new JsonHelper();
+
+Map<String, Object> map = jsonHelper.fromJsonToMap(jsonString);
+String json = jsonHelper.toJson(myObject);
+JsonMapper mapper = JacksonUtils.getDefaultJsonMapper();
+----
+
+==== Removed: `McpJsonParser`
+
+`McpJsonParser` (in `org.springframework.ai.mcp.annotation.method.tool.utils`) has been deleted.
+Its functionality is now covered by `JsonHelper`.
+
+===== Migration
+
+[cols="1,1", options="header"]
+|===
+| Before | After
+| `McpJsonParser.toMap(object)` | `jsonHelper.convertToMap(object)`
+| `McpJsonParser.fromMap(map, MyType.class)` | `jsonHelper.convertFromMap(map, MyType.class)`
+| `McpJsonParser.fromMap(map, typeReference)` | `jsonHelper.convertFromMap(map, parameterizedTypeReference)`
+|===
+
+=== MCP Elicitation API: `TypeReference` Replaced by `ParameterizedTypeReference`
+
+The `elicit(...)` overloads that previously accepted `tools.jackson.core.type.TypeReference<T>` in `McpAsyncRequestContext` and `McpSyncRequestContext` now accept `org.springframework.core.ParameterizedTypeReference<T>`.
+
+==== Impact
+
+Any code that calls these methods with a Jackson `TypeReference` will fail to compile.
+
+Affected method signatures:
+
+* `McpAsyncRequestContext.elicit(TypeReference<T>)`
+* `McpAsyncRequestContext.elicit(Consumer<ElicitationSpec>, TypeReference<T>)`
+* `McpSyncRequestContext.elicit(TypeReference<T>)`
+* `McpSyncRequestContext.elicit(Consumer<ElicitationSpec>, TypeReference<T>)`
+
+==== Migration
+
+Replace the Jackson `TypeReference` anonymous class with a Spring `ParameterizedTypeReference` anonymous class:
+
+[source,java]
+----
+// Before
+import tools.jackson.core.type.TypeReference;
+
+Mono<StructuredElicitResult<Map<String, Object>>> result =
+    context.elicit(e -> e.message("Please fill in the form"),
+        new TypeReference<Map<String, Object>>() {});
+
+// After
+import org.springframework.core.ParameterizedTypeReference;
+
+Mono<StructuredElicitResult<Map<String, Object>>> result =
+    context.elicit(e -> e.message("Please fill in the form"),
+        new ParameterizedTypeReference<Map<String, Object>>() {});
+----
+
+The same change applies to `McpSyncRequestContext`:
+
+[source,java]
+----
+// Before
+StructuredElicitResult<Person> result =
+    context.elicit(e -> e.message("Provide your details"),
+        new TypeReference<Person>() {});
+
+// After
+StructuredElicitResult<Person> result =
+    context.elicit(e -> e.message("Provide your details"),
+        new ParameterizedTypeReference<Person>() {});
+----
+
+=== Google GenAI Embedding: `GoogleGenAiEmbeddingConnectionDetails` Package Change
+
+`GoogleGenAiEmbeddingConnectionDetails` has been moved from `org.springframework.ai.google.genai`
+to `org.springframework.ai.google.genai.embedding`.
+
+==== Impact
+
+Any code that directly imports `GoogleGenAiEmbeddingConnectionDetails` will fail to compile.
+
+==== Migration
+
+Update the import statement:
+
+[source,java]
+----
+// Before
+import org.springframework.ai.google.genai.GoogleGenAiEmbeddingConnectionDetails;
+
+// After
+import org.springframework.ai.google.genai.embedding.GoogleGenAiEmbeddingConnectionDetails;
+----
+
+[[upgrading-to-2-0-0-M7]]
+== Upgrading to 2.0.0-M7
+
+=== ChatClient Tool Calling
+
+==== New: Automatic `ToolCallAdvisor` Registration
+
+`ChatClient` now automatically registers a `ToolCallAdvisor` in the advisor chain whenever tools are configured on a call (via `.tools(...)`, `.toolCallbacks(...)`, or defaults set on the builder). Previously, callers had to add `ToolCallAdvisor` manually.
+
+===== Impact
+
+Existing code that already adds a `ToolCallAdvisor` explicitly will have the advisor present in the chain twice — once from the explicit add and once from auto-registration.
+
+===== Migration
+
+Remove the explicit `ToolCallAdvisor` from the chain and let auto-registration handle it. If you need a custom configuration, either supply a pre-configured `ToolCallAdvisor.Builder` at `ChatClient` construction time (see the xref:api/chatclient.adoc#_customizing_the_default_toolcalladvisor[Customizing the Default ToolCallAdvisor] section), or disable auto-registration and register the advisor manually:
+
+[source,java]
+----
+// Before — manual registration
+chatClient.prompt("What's the weather?")
+    .tools(weatherTool)
+    .advisors(ToolCallAdvisor.builder().build())
+    .call().content();
+
+// After — auto-registration handles it; no explicit advisor needed
+chatClient.prompt("What's the weather?")
+    .tools(weatherTool)
+    .call().content();
+
+// Or, to keep full control, disable auto-registration explicitly
+chatClient.prompt("What's the weather?")
+    .tools(weatherTool)
+    .advisors(
+        AdvisorParams.toolCallAdvisorAutoRegister(false),
+        ToolCallAdvisor.builder().build()
+    )
+    .call().content();
+----
+
+==== New: `ToolAdvisor` Marker Interface
+
+A `ToolAdvisor` marker interface has been added. `ToolCallAdvisor` implements it. `DefaultChatClient` checks for this marker to decide whether to auto-register a `ToolCallAdvisor` — if any advisor in the chain already implements `ToolAdvisor`, auto-registration is skipped.
+
+Custom advisors that own the tool-call lifecycle should implement `ToolAdvisor` to prevent a duplicate `ToolCallAdvisor` from being added automatically.
+
+==== New: `MemoryAdvisor` Marker Interface
+
+A `MemoryAdvisor` marker interface has been added. `BaseChatMemoryAdvisor` now extends it. `DefaultChatClient` uses this marker to detect downstream memory advisors and disable the `ToolCallAdvisor`'s internal conversation history when one is present.
+
+Custom memory advisors that do not extend `BaseChatMemoryAdvisor` but should integrate with the tool-call auto-registration logic should implement `MemoryAdvisor`.
+
+==== New: `ChatClient.builder()` Overload for Custom `ToolCallAdvisor` Configuration
+
+A new 5-argument `ChatClient.builder()` static method and a matching `DefaultChatClientBuilder` constructor accept a `ToolCallAdvisor.Builder<?>` to configure the advisor used during auto-registration:
+
+[source,java]
+----
+ChatClient chatClient = ChatClient
+    .builder(chatModel, observationRegistry, null, null,
+            ToolCallAdvisor.builder().toolCallingManager(myToolCallingManager))
+    .build();
+----
+
+Spring Boot users should prefer one of the following instead:
+
+* Set `spring.ai.chat.client.tool-calling.advisor-order` to control the advisor's position in the chain.
+* Declare a `ToolCallAdvisor.Builder<?>` bean to fully replace the auto-configured builder (suppressed via `@ConditionalOnMissingBean`).
+
+==== Removed: `ToolSpec` Consumer API on `ChatClient`
+
+The `tools(Consumer<ToolSpec>)` / `defaultTools(Consumer<ToolSpec>)` API and the `ChatClient.ToolSpec` interface have been removed. The `tools(Object...)` / `defaultTools(Object...)` methods now directly accept `ToolCallback`, `ToolCallbackProvider`, `@Tool`-annotated POJO instances, and collections or arrays of any of these types. Context is set separately via the dedicated `toolContext()` / `defaultToolContext()` methods.
+
+===== Migration
+
+[source,java]
+----
+// Before
+chatClient.prompt()
+    .tools(t -> t.callbacks(myCallback).context("tenantId", "acme"))
+    .call().content();
+
+// After
+chatClient.prompt()
+    .tools(myCallback)
+    .toolContext(Map.of("tenantId", "acme"))
+    .call().content();
+----
+
+The individual `toolCallbacks()` methods on `ChatClientRequestSpec` and `defaultToolCallbacks()` on `ChatClient.Builder` are deprecated in favour of `tools(Object...)` / `defaultTools(Object...)`.
+
+==== Changed: `MethodToolCallbackProvider` throws `IllegalArgumentException` instead of `IllegalStateException`
+
+`MethodToolCallbackProvider` now throws `IllegalArgumentException` (instead of `IllegalStateException`) in two cases:
+
+* When a tool object has no `@Tool`-annotated methods.
+* When multiple tool objects produce callbacks with duplicate names.
+
+===== Impact
+
+Code that catches `IllegalStateException` from `MethodToolCallbackProvider` (directly or via `ToolCallbacks.from()`) must be updated.
+
+[source,java]
+----
+// Before
+try {
+    ToolCallbacks.from(myObject);
+}
+catch (IllegalStateException e) { ... }
+
+// After
+try {
+    ToolCallbacks.from(myObject);
+}
+catch (IllegalArgumentException e) { ... }
+----
+
+==== Removed: Spring Bean Tool Resolution (`SpringBeanToolCallbackResolver`)
+
+`SpringBeanToolCallbackResolver` and the pattern of declaring bare `Function` / `Supplier` / `Consumer` beans and referencing them by name via `toolNames()` have been removed. The `toolNames()` method has been removed from all chat options classes and from `ChatClient`.
+
+===== Migration
+
+Declare `ToolCallback` beans directly instead of raw functional beans:
+
+[source,java]
+----
+// Before — bare Function bean resolved by name at runtime
+@Bean
+@Description("Get the weather in location")
+Function<WeatherRequest, WeatherResponse> currentWeather() {
+    return weatherService::getWeather;
+}
+
+// After — explicit ToolCallback bean
+@Bean
+ToolCallback currentWeather() {
+    return FunctionToolCallback.builder("currentWeather", weatherService::getWeather)
+        .description("Get the weather in location")
+        .inputType(WeatherRequest.class)
+        .build();
+}
+----
+
+Then register the bean directly with `tools()`:
+
+[source,java]
+----
+chatClient.prompt("What's the weather like in Copenhagen?")
+    .tools(currentWeather)
+    .call().content();
+----
+
+Alternatively, use `@Tool`-annotated methods for the declarative approach (see xref:api/tools.adoc[Tools API]).
+
+=== Cloud Bindings
+
+The `spring-ai-spring-cloud-bindings` module that provided integration for https://github.com/spring-cloud/spring-cloud-bindings has been removed.
+
+=== BeanOutputConverter JSON Schema Generation
+
+`BeanOutputConverter` now delegates JSON Schema generation to `JsonSchemaGenerator`, aligning structured output conversion with the JSON Schema behavior used for tool calling.
+
+==== Impact
+
+* Kotlin properties that are optional in their primary constructor (nullable or declared with a default value) are no longer included in the JSON Schema `required` array.
+* Properties annotated with `@JsonProperty(required = false)`, including `@JsonProperty` declarations where `required` is not specified, are no longer treated as required.
+* Generated schemas now include OpenAPI-style `format` hints for primitive types (e.g., `int32` for `int`, `int64` for `long`, `date-time` for `LocalDateTime`), matching the format conventions used for tool calling.
+* The `BeanOutputConverter.postProcessSchema(JsonNode)` extension point has been removed. Custom subclasses overriding this method will fail to compile.
+
+==== Migration
+
+To customize JSON Schema generation, override `BeanOutputConverter.generateSchema()` instead. Subclasses can post-process the default schema by delegating to `super.generateSchema()`.
+
+[source,java]
+----
+// Before
+class CustomConverter extends BeanOutputConverter<MyType> {
+
+    CustomConverter() {
+        super(MyType.class);
+    }
+
+    @Override
+    protected void postProcessSchema(JsonNode schema) {
+        // mutate schema
+    }
+}
+
+// After
+class CustomConverter extends BeanOutputConverter<MyType> {
+
+    CustomConverter() {
+        super(MyType.class);
+    }
+
+    @Override
+    protected String generateSchema() {
+        String schema = super.generateSchema();
+        // post-process schema
+        return schema;
+    }
+}
+----
+
+=== Azure Cosmos DB Support
+
+The Azure Cosmos DB vector store (`spring-ai-azure-cosmos-db-store`) and chat memory repository (`spring-ai-model-chat-memory-repository-cosmos-db`) modules, along with their corresponding auto-configurations and starters, have been removed from the Spring AI project.
+
+Azure Cosmos DB support is now available as an external module maintained by the Azure Cosmos DB team.
+See https://azurecosmosdb.github.io/spring-ai/docs/index.html for documentation and dependency coordinates.
+
+=== MCP SDK 2.0.0-M3
+
+Spring AI now depends on MCP SDK 2.0.0-M3, which makes previously optional fields mandatory and enforces them at construction time via `Assert.notNull()` in compact record constructors.
+
+==== Breaking: `CreateMessageResult` — `model` now required
+
+[source,java]
+----
+// Before
+CreateMessageResult.builder()
+    .content(new TextContent(response))
+    .build();
+
+// After
+CreateMessageResult.builder(Role.ASSISTANT, response, modelHint)
+    .build();
+----
+
+==== Breaking: `CreateMessageRequest` — `maxTokens` now required
+
+[source,java]
+----
+// Before
+CreateMessageRequest.builder()
+    .messages(messages)
+    .build();
+
+// After
+CreateMessageRequest.builder(messages, 500)
+    .build();
+----
+
+==== Deprecated Builder APIs
+
+The following no-arg constructors and `builder()` methods are deprecated in favour of factory methods that require mandatory arguments upfront:
+
+[cols="1,1"]
+|===
+|Deprecated |Replacement
+
+|`new TextContent(text)` |`TextContent.builder(text).build()`
+|`new ReadResourceResult(contents)` |`ReadResourceResult.builder(contents).build()`
+|`new GetPromptResult(description, messages)` |`GetPromptResult.builder(messages).description(description).build()`
+|`new ProgressNotification(token, progress, total, message)` |`ProgressNotification.builder(token, progress).total(total).message(message).build()`
+|`LoggingMessageNotification.builder()` |`LoggingMessageNotification.builder(level, data)`
+|`ElicitRequest.builder()` |`ElicitRequest.builder(message, requestedSchema)`
+|`CallToolRequest.builder()` |`CallToolRequest.builder(name)`
+|===
+
+[[upgrading-to-2-0-0-M6]]
+== Upgrading to 2.0.0-M6
+
+=== Options and Properties
+
+The configuration properties do not use `.options` anymore, so for example the former `spring.ai.openai.chat.options.model` is now `spring.ai.openai.chat.model`.
+Deprecated configuration properties are provided for the `.options` ones in order to provide a smoother migration experience.
+
+The setters have been removed from the options classes, builder should now be used instead.
+
+=== Observability
+
+==== Tool Calling
+
+The observations produced for tool calling operations have changed as follows:
+
+* the span name is `execute_tool <tool-name>` instead of `tool_call <tool-name>`.
+* the metric/span attribute `gen_ai.operation.name` has value `execute_tool` instead of `framework`.
+* a new `spring.ai.tool.type` metric/span attribute has been introduced to capture the tool type (e.g. `function`).
+* a new `spring.ai.tool.call.id` span attribute has been introduced to capture the tool call ID, as identified by the chat model.
+
+=== Removed Modules
+
+==== `spring-ai-hanadb-store` module removal
+
+The `spring-ai-hanadb-store` module has been **removed** from Spring AI as of version `2.0.0-M6`.
+
+[[upgrading-to-2-0-0-M6-chat-memory]]
+== Upgrading to 2.0.0-M6
+
+=== Chat Memory Advisors: Conversation ID Is Now Required
+
+The conversation ID is no longer optional for the built-in memory advisors (`MessageChatMemoryAdvisor` and `VectorStoreChatMemoryAdvisor`).
+Every call through these advisors must supply `ChatMemory.CONVERSATION_ID` via the advisor context.
+If the value is absent or `null`, the advisor throws an `IllegalArgumentException` immediately.
+
+==== Removed: `ChatMemory.DEFAULT_CONVERSATION_ID`
+
+The constant `ChatMemory.DEFAULT_CONVERSATION_ID` (value `"default"`) has been removed from the `ChatMemory` interface.
+
+===== Impact
+
+Code that references this constant will fail to compile.
+
+===== Migration
+
+Replace any reference to `ChatMemory.DEFAULT_CONVERSATION_ID` with an explicit conversation ID string or a value derived from your session/user context.
+
+[source,java]
+----
+// Before
+String conversationId = ChatMemory.DEFAULT_CONVERSATION_ID;
+
+// After
+String conversationId = "my-conversation-id";
+----
+
+==== Removed: `.conversationId()` Builder Method on Memory Advisors
+
+The `.conversationId(String)` builder method has been removed from `MessageChatMemoryAdvisor.Builder` and `VectorStoreChatMemoryAdvisor.Builder`.
+Setting a default conversation ID at construction time is no longer supported.
+
+===== Impact
+
+Code that calls `.conversationId()` on any of these builders will fail to compile.
+
+===== Migration
+
+Remove the `.conversationId()` builder call and always supply the conversation ID at call time via the advisor context using `ChatMemory.CONVERSATION_ID`:
+
+[source,java]
+----
+// Before
+ChatClient chatClient = ChatClient.builder(chatModel)
+    .defaultAdvisors(MessageChatMemoryAdvisor.builder(chatMemory)
+        .conversationId("my-session")
+        .build())
+    .build();
+
+chatClient.prompt()
+    .user("Hello!")
+    .call()
+    .content();
+
+// After
+ChatClient chatClient = ChatClient.builder(chatModel)
+    .defaultAdvisors(MessageChatMemoryAdvisor.builder(chatMemory).build())
+    .build();
+
+chatClient.prompt()
+    .user("Hello!")
+    .advisors(a -> a.param(ChatMemory.CONVERSATION_ID, "my-session"))
+    .call()
+    .content();
+----
+
+==== Changed: `BaseChatMemoryAdvisor.getConversationId()` Signature
+
+The default method `BaseChatMemoryAdvisor.getConversationId(Map, String)` has been replaced by `getConversationId(Map)`.
+
+===== Impact
+
+Custom advisor implementations that override or call the two-argument form will fail to compile.
+
+===== Migration
+
+Update overrides and call sites to the single-argument form. Ensure the context always contains `ChatMemory.CONVERSATION_ID` before calling the method.
+
+[source,java]
+----
+// Before
+String conversationId = getConversationId(context, this.defaultConversationId);
+
+// After
+String conversationId = getConversationId(context); // throws if CONVERSATION_ID is absent
+----
+
+=== Removed: `PromptChatMemoryAdvisor`
+
+`PromptChatMemoryAdvisor` has been removed. Use `MessageChatMemoryAdvisor` as a replacement.
+
+==== Impact
+
+Code that imports or references `PromptChatMemoryAdvisor` will fail to compile.
+
+==== Migration
+
+Replace `PromptChatMemoryAdvisor` with `MessageChatMemoryAdvisor`. The builder API is identical.
+Instead of injecting memory as plain text into the system prompt, `MessageChatMemoryAdvisor` includes the conversation history directly as chat messages in the prompt.
+
+[source,java]
+----
+// Before
+ChatClient chatClient = ChatClient.builder(chatModel)
+    .defaultAdvisors(PromptChatMemoryAdvisor.builder(chatMemory).build())
+    .build();
+
+// After
+ChatClient chatClient = ChatClient.builder(chatModel)
+    .defaultAdvisors(MessageChatMemoryAdvisor.builder(chatMemory).build())
+    .build();
+----
 
 [[upgrading-to-2-0-0-M5]]
 == Upgrading to 2.0.0-M5
@@ -23,6 +836,10 @@ Existing users should use the `spring-ai-openai` module (and related starter and
 The `spring-ai-openai-sdk` module (and its associated Spring Boot starter `spring-ai-starter-model-openai-sdk` and auto-configuration `spring-ai-autoconfigure-model-openai-sdk`) have been **removed** from Spring AI as of version `2.0.0-M5`.
 
 Existing users should use the `spring-ai-openai` module (and related starter and auto-configuration) instead and adapt class names accordingly (by removing the `Sdk` suffix for example) and configuration properties accordingly.
+
+==== `spring-ai-oci-genai` module removal
+
+The related modules can now be found at https://github.com/oracle/spring-cloud-oracle/tree/main/spring-ai-oracle.
 
 === ChatOptions Handling
 Users can interact with ChatModels in two ways:
@@ -829,7 +1646,7 @@ If you want to maintain the previous behavior, explicitly set the temperature in
 [source,properties]
 ----
 # Example for OpenAI
-spring.ai.openai.chat.options.temperature=0.7
+spring.ai.openai.chat.temperature=0.7
 
 # Example for Anthropic
 spring.ai.anthropic.chat.options.temperature=0.7
@@ -941,7 +1758,7 @@ The 1.0.0-SNAPSHOT version includes significant changes to artifact IDs, package
 === Add Snapshot Repositories
 
 To use the 1.0.0-SNAPSHOT version, you need to add the snapshot repositories to your build file.
-For detailed instructions, refer to the xref:getting-started.adoc#snapshots-add-snapshot-repositories[Snapshots - Add Snapshot Repositories] section in the Getting Started guide.
+For detailed instructions, refer to the xref:getting-started.adoc#_snapshots_add_snapshot_repositories[Snapshots - Add Snapshot Repositories] section in the Getting Started guide.
 
 === Update Dependency Management
 
@@ -986,9 +1803,6 @@ The built-in advisors that perform prompt augmentation have been updated to use 
 * The `QuestionAnswerAdvisor` expects a template with the following placeholders (see xref:api/retrieval-augmented-generation.adoc#_questionansweradvisor[more details]):
 ** a `query` placeholder to receive the user question.
 ** a `question_answer_context` placeholder to receive the retrieved context.
-* The `PromptChatMemoryAdvisor` expects a template with the following placeholders (see xref:api/chat-memory.adoc#_promptchatmemoryadvisor[more details]):
-** an `instructions` placeholder to receive the original system message.
-** a `memory` placeholder to receive the retrieved conversation memory.
 * The `VectorStoreChatMemoryAdvisor` expects a template with the following placeholders (see xref:api/chat-memory.adoc#_vectorstorechatmemoryadvisor[more details]):
 ** an `instructions` placeholder to receive the original system message.
 ** a `long_term_memory` placeholder to receive the retrieved conversation memory.
@@ -1338,7 +2152,7 @@ You can automate the upgrade process to 1.0.0-M7 using the Claude Code CLI tool 
 3. Paste the prompt into the Claude Code CLI
 4. The AI will analyze your project and make the necessary changes
 
-NOTE: The automated upgrade prompt currently handles artifact ID changes, package relocations, and module structure changes, but does not yet include automatic changes for upgrading to MCP 0.9.0. If you're using MCP, you'll need to manually update your code following the guidance in the xref:upgrade-notes.adoc#mcp-java-sdk-upgrade-to-0-9-0[MCP Java SDK Upgrade] section.
+NOTE: The automated upgrade prompt currently handles artifact ID changes, package relocations, and module structure changes, but does not yet include automatic changes for upgrading to MCP 0.9.0. If you're using MCP, you'll need to manually update your code following the guidance in the xref:upgrade-notes.adoc#_mcp_java_sdk_upgrade_to_0_9_0[MCP Java SDK Upgrade] section.
 
 [[common-sections]]
 == Common Changes Across Versions
@@ -1691,9 +2505,8 @@ Not all vector stores support this property.
 See the corresponding vector store documentation for more details.
 The following are the vector stores that currently don't support the `initialize-schema` property.
 
-1. Hana
-2. Pinecone
-3. Weaviate
+1. Pinecone
+2. Weaviate
 
 * In Bedrock Jurassic 2, the chat options `countPenalty`, `frequencyPenalty`, and `presencePenalty`
 have been renamed to `countPenaltyOptions`, `frequencyPenaltyOptions`, and `presencePenaltyOptions`.
@@ -1792,8 +2605,8 @@ to
 
 The following OpenAi Autoconfiguration chat properties have changed
 
-* from `spring.ai.openai.model` to `spring.ai.openai.chat.options.model`.
-* from `spring.ai.openai.temperature` to `spring.ai.openai.chat.options.temperature`.
+* from `spring.ai.openai.model` to `spring.ai.openai.chat.model`.
+* from `spring.ai.openai.temperature` to `spring.ai.openai.chat.temperature`.
 
 Find updated documentation about the OpenAi properties: https://docs.spring.io/spring-ai/reference/api/chat/openai-chat.html
 

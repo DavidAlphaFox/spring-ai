@@ -22,13 +22,13 @@ import java.sql.SQLException;
 import java.sql.Timestamp;
 import java.time.Instant;
 import java.util.List;
-import java.util.concurrent.atomic.AtomicLong;
+import java.util.Map;
 
 import javax.sql.DataSource;
 
+import org.apache.commons.logging.Log;
+import org.apache.commons.logging.LogFactory;
 import org.jspecify.annotations.Nullable;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 
 import org.springframework.ai.chat.memory.ChatMemoryRepository;
 import org.springframework.ai.chat.messages.AssistantMessage;
@@ -57,13 +57,20 @@ import org.springframework.util.Assert;
  */
 public final class JdbcChatMemoryRepository implements ChatMemoryRepository {
 
+	/**
+	 * Metadata key under which each message's creation timestamp (an {@link Instant}) is
+	 * exposed when messages are read back from the repository. Messages carrying this key
+	 * retain their original timestamp when the conversation is saved again.
+	 *
+	 * @since 2.0.0
+	 */
+	public static final String CONVERSATION_TS = JdbcChatMemoryRepository.class.getSimpleName() + "_message_timestamp";
+
 	private final JdbcTemplate jdbcTemplate;
 
 	private final TransactionTemplate transactionTemplate;
 
 	private final JdbcChatMemoryRepositoryDialect dialect;
-
-	private static final Logger logger = LoggerFactory.getLogger(JdbcChatMemoryRepository.class);
 
 	private JdbcChatMemoryRepository(JdbcTemplate jdbcTemplate, JdbcChatMemoryRepositoryDialect dialect,
 			@Nullable PlatformTransactionManager txManager) {
@@ -96,11 +103,10 @@ public final class JdbcChatMemoryRepository implements ChatMemoryRepository {
 		Assert.notNull(messages, "messages cannot be null");
 		Assert.noNullElements(messages, "messages cannot contain null elements");
 
-		this.transactionTemplate.execute(status -> {
+		this.transactionTemplate.executeWithoutResult(status -> {
 			deleteByConversationId(conversationId);
 			this.jdbcTemplate.batchUpdate(this.dialect.getInsertMessageSql(),
 					new AddBatchPreparedStatement(conversationId, messages));
-			return null;
 		});
 	}
 
@@ -114,15 +120,8 @@ public final class JdbcChatMemoryRepository implements ChatMemoryRepository {
 		return new Builder();
 	}
 
-	private record AddBatchPreparedStatement(String conversationId, List<Message> messages,
-			AtomicLong sequenceId) implements BatchPreparedStatementSetter {
-
-		private AddBatchPreparedStatement(String conversationId, List<Message> messages) {
-			// Use second-level granularity to ensure compatibility with all database
-			// timestamp precisions. The timestamp serves as a sequence number for
-			// message ordering, not as a precise temporal record.
-			this(conversationId, messages, new AtomicLong(Instant.now().getEpochSecond()));
-		}
+	private record AddBatchPreparedStatement(String conversationId,
+			List<Message> messages) implements BatchPreparedStatementSetter {
 
 		@Override
 		public void setValues(PreparedStatement ps, int i) throws SQLException {
@@ -131,9 +130,16 @@ public final class JdbcChatMemoryRepository implements ChatMemoryRepository {
 			ps.setString(1, this.conversationId);
 			ps.setString(2, message.getText());
 			ps.setString(3, message.getMessageType().name());
-			// Convert seconds to milliseconds for Timestamp constructor.
-			// Each message gets a unique second value, ensuring proper ordering.
-			ps.setTimestamp(4, new Timestamp(this.sequenceId.getAndIncrement() * 1000L));
+			// Preserve the original creation time across the delete-and-reinsert
+			// performed by saveAll(): reuse the timestamp carried in the message
+			// metadata if present, otherwise stamp the current time for a new message.
+			Object messageTs = message.getMetadata().get(CONVERSATION_TS);
+			Instant timestamp = (messageTs instanceof Instant instant) ? instant : Instant.now();
+			ps.setTimestamp(4, Timestamp.from(timestamp));
+			// The sequence_id is the message's position within the conversation. Since
+			// saveAll() deletes and reinserts the whole conversation in a single batch,
+			// the batch index is a stable, database-portable ordering key.
+			ps.setLong(5, i);
 		}
 
 		@Override
@@ -148,15 +154,18 @@ public final class JdbcChatMemoryRepository implements ChatMemoryRepository {
 		public Message mapRow(ResultSet rs, int i) throws SQLException {
 			var content = rs.getString(1);
 			var type = MessageType.valueOf(rs.getString(2));
+			Timestamp timestamp = rs.getTimestamp(3);
+			Map<String, Object> metadata = (timestamp != null) ? Map.of(CONVERSATION_TS, timestamp.toInstant())
+					: Map.of();
 
 			return switch (type) {
-				case USER -> new UserMessage(content);
-				case ASSISTANT -> new AssistantMessage(content);
-				case SYSTEM -> new SystemMessage(content);
+				case USER -> UserMessage.builder().text(content).metadata(metadata).build();
+				case ASSISTANT -> AssistantMessage.builder().content(content).properties(metadata).build();
+				case SYSTEM -> SystemMessage.builder().text(content).metadata(metadata).build();
 				// The content is always stored empty for ToolResponseMessages.
 				// If we want to capture the actual content, we need to extend
 				// AddBatchPreparedStatement to support it.
-				case TOOL -> ToolResponseMessage.builder().responses(List.of()).build();
+				case TOOL -> ToolResponseMessage.builder().responses(List.of()).metadata(metadata).build();
 			};
 		}
 
@@ -172,7 +181,7 @@ public final class JdbcChatMemoryRepository implements ChatMemoryRepository {
 
 		private @Nullable PlatformTransactionManager platformTransactionManager;
 
-		private static final Logger logger = LoggerFactory.getLogger(Builder.class);
+		private static final Log logger = LogFactory.getLog(Builder.class);
 
 		private Builder() {
 		}
@@ -241,8 +250,11 @@ public final class JdbcChatMemoryRepository implements ChatMemoryRepository {
 		private void warnIfDialectMismatch(DataSource dataSource, JdbcChatMemoryRepositoryDialect explicitDialect) {
 			JdbcChatMemoryRepositoryDialect detected = JdbcChatMemoryRepositoryDialect.from(dataSource);
 			if (!detected.getClass().equals(explicitDialect.getClass())) {
-				logger.warn("Explicitly set dialect {} will be used instead of detected dialect {} from datasource",
-						explicitDialect.getClass().getSimpleName(), detected.getClass().getSimpleName());
+				if (logger.isWarnEnabled()) {
+					logger.warn("Explicitly set dialect " + explicitDialect.getClass().getSimpleName()
+							+ " will be used instead of detected dialect " + detected.getClass().getSimpleName()
+							+ " from datasource");
+				}
 			}
 		}
 

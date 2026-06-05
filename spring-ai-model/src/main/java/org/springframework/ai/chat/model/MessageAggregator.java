@@ -23,8 +23,8 @@ import java.util.Map;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Consumer;
 
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
+import org.apache.commons.logging.Log;
+import org.apache.commons.logging.LogFactory;
 import reactor.core.publisher.Flux;
 
 import org.springframework.ai.chat.messages.AssistantMessage;
@@ -43,18 +43,15 @@ import org.springframework.util.StringUtils;
  *
  * <p>
  * 当使用 {@link StreamingChatModel#stream(org.springframework.ai.chat.prompt.Prompt)}
- * 调用模型时，模型会以多条 {@link ChatResponse} 片段的形式增量返回结果（典型如
- * 一个 token 一片）。下游消费者通常希望同时具备两种能力：
+ * 调用模型时，模型会以多条 {@link ChatResponse} 片段的形式增量返回结果（典型如 一个 token 一片）。下游消费者通常希望同时具备两种能力：
  * <ol>
  * <li>实时透传：将增量片段立刻推给前端 / SSE 客户端；</li>
- * <li>事后归档：在流结束时拿到一个「完整的、合并好的」 {@link ChatResponse}
- * 用于日志记录、Advisor 后处理或对话历史持久化。</li>
+ * <li>事后归档：在流结束时拿到一个「完整的、合并好的」 {@link ChatResponse} 用于日志记录、Advisor 后处理或对话历史持久化。</li>
  * </ol>
  *
  * <p>
- * {@code MessageAggregator} 即为第二个目标设计：它不打断原始流，而是「旁路」地
- * 在订阅、推进与完成的各个生命周期回调中收集所有片段，最终在 {@code onComplete}
- * 时构造一个完整的 {@link ChatResponse} 通过 {@link Consumer} 回调出去。
+ * {@code MessageAggregator} 即为第二个目标设计：它不打断原始流，而是「旁路」地 在订阅、推进与完成的各个生命周期回调中收集所有片段，最终在
+ * {@code onComplete} 时构造一个完整的 {@link ChatResponse} 通过 {@link Consumer} 回调出去。
  *
  * <p>
  * 聚合的字段包括：
@@ -62,13 +59,12 @@ import org.springframework.util.StringUtils;
  * <li>文本内容（含 thoughts / outputWithoutThoughts 拆分）；</li>
  * <li>消息级元数据 Map；</li>
  * <li>工具调用列表 ToolCall；</li>
- * <li>响应级元数据：模型 ID、模型名、用量 Usage（取每次出现的最新非零值）、
- * PromptMetadata、RateLimit。</li>
+ * <li>响应级元数据：模型 ID、模型名、用量 Usage（取每次出现的最新非零值）、 PromptMetadata、RateLimit。</li>
  * </ul>
  *
  * <p>
- * 由于使用了 {@link AtomicReference} 持有可变状态并在每次 {@code subscribe} 时重置，
- * 该聚合器实例可以被多次复用（但不要并发对同一份 Flux 重复订阅）。
+ * 由于使用了 {@link AtomicReference} 持有可变状态并在每次 {@code subscribe} 时重置， 该聚合器实例可以被多次复用（但不要并发对同一份
+ * Flux 重复订阅）。
  *
  * @author Christian Tzolov
  * @author Alexandros Pappas
@@ -78,24 +74,22 @@ import org.springframework.util.StringUtils;
  */
 public class MessageAggregator {
 
-	private static final Logger logger = LoggerFactory.getLogger(MessageAggregator.class);
+	private static final Log logger = LogFactory.getLog(MessageAggregator.class);
 
 	/**
-	 * 对给定的流式响应 {@link Flux} 进行旁路聚合：原样透传每一段
-	 * {@link ChatResponse}，同时在内部累积状态；当上游 {@code onComplete} 时，
-	 * 将累积出的完整 {@link ChatResponse} 通过 {@code onAggregationComplete} 回调出去。
+	 * 对给定的流式响应 {@link Flux} 进行旁路聚合：原样透传每一段 {@link ChatResponse}，同时在内部累积状态；当上游
+	 * {@code onComplete} 时， 将累积出的完整 {@link ChatResponse} 通过 {@code onAggregationComplete}
+	 * 回调出去。
 	 *
 	 * <p>
 	 * 关键实现点：
 	 * <ul>
 	 * <li>所有累积状态均放在方法内的 {@link AtomicReference} 中，与外部隔离；</li>
-	 * <li>{@code doOnSubscribe} 时将所有状态重置为初始值，使得同一个聚合器实例
-	 * 可以被多次安全复用；</li>
-	 * <li>{@code doOnNext} 中按字段做条件累积，只有「非空 / 有意义」的值才会覆盖
-	 * 旧值，避免被中间空片段覆写；</li>
-	 * <li>对 {@code metadata.isThought} 做特殊处理，将「思考」与「最终输出」分别
-	 * 累积到不同 StringBuilder，并在最终消息的元数据中以 {@code thoughts} /
-	 * {@code outputWithoutThoughts} 暴露。</li>
+	 * <li>{@code doOnSubscribe} 时将所有状态重置为初始值，使得同一个聚合器实例 可以被多次安全复用；</li>
+	 * <li>{@code doOnNext} 中按字段做条件累积，只有「非空 / 有意义」的值才会覆盖 旧值，避免被中间空片段覆写；</li>
+	 * <li>对 {@code metadata.isThought} 做特殊处理，将「思考」与「最终输出」分别 累积到不同
+	 * StringBuilder，并在最终消息的元数据中以 {@code thoughts} / {@code outputWithoutThoughts}
+	 * 暴露。</li>
 	 * </ul>
 	 * @param fluxChatResponse 上游流式响应
 	 * @param onAggregationComplete 上游 complete 时收到完整聚合结果的回调
@@ -198,11 +192,10 @@ public class MessageAggregator {
 						&& chatResponse.getMetadata().getPromptMetadata().iterator().hasNext()) {
 					metadataPromptMetadataRef.set(chatResponse.getMetadata().getPromptMetadata());
 				}
-				// 注意：此处条件原意应为「当前累积值还是 EmptyRateLimit 时才更新」，
-				// 实际表达式为反向，行为取决于上游是否传入有意义的 RateLimit；保留原逻辑
-				if (chatResponse.getMetadata().getRateLimit() != null
-						&& !(metadataRateLimitRef.get() instanceof EmptyRateLimit)) {
-					metadataRateLimitRef.set(chatResponse.getMetadata().getRateLimit());
+				// 仅当传入的 RateLimit 有意义（非空且非 EmptyRateLimit）时才覆盖累积值
+				RateLimit incomingRateLimit = chatResponse.getMetadata().getRateLimit();
+				if (incomingRateLimit != null && !(incomingRateLimit instanceof EmptyRateLimit)) {
+					metadataRateLimitRef.set(incomingRateLimit);
 				}
 				if (StringUtils.hasText(chatResponse.getMetadata().getId())) {
 					metadataIdRef.set(chatResponse.getMetadata().getId());
@@ -282,8 +275,7 @@ public class MessageAggregator {
 	/**
 	 * {@link Usage} 的默认 record 实现，承载聚合后的三类 token 计数。
 	 * <p>
-	 * 同时实现了 {@link #getNativeUsage()}，以 Map 形式暴露原生用量字段，方便上层
-	 * 序列化或与厂商原生格式对齐。
+	 * 同时实现了 {@link #getNativeUsage()}，以 Map 形式暴露原生用量字段，方便上层 序列化或与厂商原生格式对齐。
 	 *
 	 * @param promptTokens 输入 token 数（提示词消耗）
 	 * @param completionTokens 输出 token 数（生成消耗）

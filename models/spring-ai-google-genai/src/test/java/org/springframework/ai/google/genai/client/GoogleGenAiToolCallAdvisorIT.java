@@ -41,6 +41,7 @@ import static org.assertj.core.api.Assertions.assertThat;
  * Integration tests for {@link ToolCallAdvisor} functionality.
  *
  * @author Christian Tzolov
+ * @author Sebastien Deleuze
  */
 @SpringBootTest
 @EnabledIfEnvironmentVariable(named = "GOOGLE_CLOUD_PROJECT", matches = ".+")
@@ -54,13 +55,12 @@ class GoogleGenAiToolCallAdvisorIT extends AbstractToolCallAdvisorIT {
 
 		Flux<String> response = chatClient.prompt()
 			.user("What's the weather like in San Francisco, Tokyo, and Paris in Celsius?")
-			.toolCallbacks(createWeatherToolCallback())
+			.tools(createWeatherToolCallback())
 			.stream()
 			.content();
 
 		List<String> chunks = response.collectList().block();
 		String content = Objects.requireNonNull(chunks).stream().collect(Collectors.joining());
-		logger.info("Response: {}", content);
 
 		assertThat(content).contains("30", "10", "15");
 	}
@@ -76,7 +76,7 @@ class GoogleGenAiToolCallAdvisorIT extends AbstractToolCallAdvisorIT {
 
 		return GoogleGenAiChatModel.builder()
 			.genAiClient(genAiClient)
-			.defaultOptions(GoogleGenAiChatOptions.builder().model(model).build())
+			.options(GoogleGenAiChatOptions.builder().model(model).build())
 			.build();
 
 	}

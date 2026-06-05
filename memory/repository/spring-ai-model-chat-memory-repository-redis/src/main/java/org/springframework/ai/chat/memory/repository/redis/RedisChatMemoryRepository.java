@@ -1,38 +1,20 @@
-package org.springframework.ai.chat.memory.repository.redis;
+/*
+ * Copyright 2023-present the original author or authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
 
-import com.google.gson.Gson;
-import com.google.gson.JsonArray;
-import com.google.gson.JsonElement;
-import com.google.gson.JsonObject;
-import org.jspecify.annotations.Nullable;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
-import org.springframework.ai.chat.memory.ChatMemoryRepository;
-import org.springframework.ai.chat.messages.AssistantMessage;
-import org.springframework.ai.chat.messages.Message;
-import org.springframework.ai.chat.messages.MessageType;
-import org.springframework.ai.chat.messages.SystemMessage;
-import org.springframework.ai.chat.messages.ToolResponseMessage;
-import org.springframework.ai.chat.messages.UserMessage;
-import org.springframework.ai.content.Media;
-import org.springframework.ai.content.MediaContent;
-import org.springframework.util.Assert;
-import org.springframework.util.MimeType;
-import redis.clients.jedis.JedisPooled;
-import redis.clients.jedis.Pipeline;
-import redis.clients.jedis.json.Path2;
-import redis.clients.jedis.search.*;
-import redis.clients.jedis.search.RediSearchUtil;
-import redis.clients.jedis.search.aggr.AggregationBuilder;
-import redis.clients.jedis.search.aggr.AggregationResult;
-import redis.clients.jedis.search.aggr.Reducers;
-import redis.clients.jedis.search.querybuilder.QueryBuilders;
-import redis.clients.jedis.search.querybuilder.QueryNode;
-import redis.clients.jedis.search.querybuilder.Values;
-import redis.clients.jedis.search.schemafields.NumericField;
-import redis.clients.jedis.search.schemafields.SchemaField;
-import redis.clients.jedis.search.schemafields.TagField;
-import redis.clients.jedis.search.schemafields.TextField;
+package org.springframework.ai.chat.memory.repository.redis;
 
 import java.net.URI;
 import java.time.Duration;
@@ -45,15 +27,55 @@ import java.util.List;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicLong;
 
+import com.google.gson.Gson;
+import com.google.gson.JsonArray;
+import com.google.gson.JsonElement;
+import com.google.gson.JsonObject;
+import org.apache.commons.logging.Log;
+import org.apache.commons.logging.LogFactory;
+import org.jspecify.annotations.Nullable;
+import redis.clients.jedis.Pipeline;
+import redis.clients.jedis.RedisClient;
+import redis.clients.jedis.json.Path2;
+import redis.clients.jedis.search.Document;
+import redis.clients.jedis.search.FTCreateParams;
+import redis.clients.jedis.search.IndexDataType;
+import redis.clients.jedis.search.Query;
+import redis.clients.jedis.search.RediSearchUtil;
+import redis.clients.jedis.search.SearchResult;
+import redis.clients.jedis.search.aggr.AggregationBuilder;
+import redis.clients.jedis.search.aggr.AggregationResult;
+import redis.clients.jedis.search.aggr.Reducers;
+import redis.clients.jedis.search.querybuilder.QueryBuilders;
+import redis.clients.jedis.search.querybuilder.QueryNode;
+import redis.clients.jedis.search.querybuilder.Values;
+import redis.clients.jedis.search.schemafields.NumericField;
+import redis.clients.jedis.search.schemafields.SchemaField;
+import redis.clients.jedis.search.schemafields.TagField;
+import redis.clients.jedis.search.schemafields.TextField;
+
+import org.springframework.ai.chat.memory.ChatMemoryRepository;
+import org.springframework.ai.chat.messages.AssistantMessage;
+import org.springframework.ai.chat.messages.Message;
+import org.springframework.ai.chat.messages.MessageType;
+import org.springframework.ai.chat.messages.SystemMessage;
+import org.springframework.ai.chat.messages.ToolResponseMessage;
+import org.springframework.ai.chat.messages.UserMessage;
+import org.springframework.ai.content.Media;
+import org.springframework.ai.content.MediaContent;
+import org.springframework.util.Assert;
+import org.springframework.util.MimeType;
+
 /**
  * Redis implementation of {@link ChatMemoryRepository} using Redis (JSON + Query Engine).
  * Stores chat messages as JSON documents and uses the Redis Query Engine for querying.
  *
  * @author Brian Sam-Bodden
+ * @author Yanming Zhou
  */
 public final class RedisChatMemoryRepository implements ChatMemoryRepository, AdvancedRedisChatMemoryRepository {
 
-	private static final Logger logger = LoggerFactory.getLogger(RedisChatMemoryRepository.class);
+	private static final Log logger = LogFactory.getLog(RedisChatMemoryRepository.class);
 
 	private static final Gson gson = new Gson();
 
@@ -61,12 +83,12 @@ public final class RedisChatMemoryRepository implements ChatMemoryRepository, Ad
 
 	private final RedisChatMemoryConfig config;
 
-	private final JedisPooled jedis;
+	private final RedisClient jedisClient;
 
 	public RedisChatMemoryRepository(RedisChatMemoryConfig config) {
 		Assert.notNull(config, "Config must not be null");
 		this.config = config;
-		this.jedis = config.getJedisClient();
+		this.jedisClient = config.getJedisClient();
 
 		if (config.isInitializeSchema()) {
 			initializeSchema();
@@ -86,14 +108,16 @@ public final class RedisChatMemoryRepository implements ChatMemoryRepository, Ad
 		}
 
 		if (logger.isDebugEnabled()) {
-			logger.debug("Adding {} messages to conversation: {}", messages.size(), conversationId);
+			if (logger.isDebugEnabled()) {
+				logger.debug("Adding " + messages.size() + " messages to conversation: " + conversationId);
+			}
 		}
 
 		// Get the next available timestamp for the first message
 		long nextTimestamp = getNextTimestampForConversation(conversationId);
 		final AtomicLong timestampSequence = new AtomicLong(nextTimestamp);
 
-		try (Pipeline pipeline = jedis.pipelined()) {
+		try (Pipeline pipeline = this.jedisClient.pipelined()) {
 			for (Message message : messages) {
 				long timestamp = timestampSequence.getAndIncrement();
 				String key = createKey(conversationId, timestamp);
@@ -106,14 +130,14 @@ public final class RedisChatMemoryRepository implements ChatMemoryRepository, Ad
 				String json = gson.toJson(documentMap);
 
 				if (logger.isDebugEnabled()) {
-					logger.debug("Storing batch message with key: {}, type: {}, content: {}", key,
-							message.getMessageType(), message.getText());
+					logger.debug("Storing batch message with key: " + key + ", type: " + message.getMessageType()
+							+ ", content: " + message.getText());
 				}
 
 				pipeline.jsonSet(key, ROOT_PATH, json);
 
-				if (config.getTimeToLiveSeconds() != -1) {
-					pipeline.expire(key, config.getTimeToLiveSeconds());
+				if (this.config.getTimeToLiveSeconds() != -1) {
+					pipeline.expire(key, this.config.getTimeToLiveSeconds());
 				}
 			}
 			pipeline.sync();
@@ -125,8 +149,8 @@ public final class RedisChatMemoryRepository implements ChatMemoryRepository, Ad
 		Assert.notNull(message, "Message must not be null");
 
 		if (logger.isDebugEnabled()) {
-			logger.debug("Adding message type: {}, content: {} to conversation: {}", message.getMessageType(),
-					message.getText(), conversationId);
+			logger.debug("Adding message type: " + message.getMessageType() + ", content: " + message.getText()
+					+ " to conversation: " + conversationId);
 		}
 
 		// Get the current highest timestamp for this conversation
@@ -141,13 +165,13 @@ public final class RedisChatMemoryRepository implements ChatMemoryRepository, Ad
 		String json = gson.toJson(documentMap);
 
 		if (logger.isDebugEnabled()) {
-			logger.debug("Storing message with key: {}, JSON: {}", key, json);
+			logger.debug("Storing message with key: " + key + ", JSON: " + json);
 		}
 
-		jedis.jsonSet(key, ROOT_PATH, json);
+		this.jedisClient.jsonSet(key, ROOT_PATH, json);
 
-		if (config.getTimeToLiveSeconds() != -1) {
-			jedis.expire(key, config.getTimeToLiveSeconds());
+		if (this.config.getTimeToLiveSeconds() != -1) {
+			this.jedisClient.expire(key, this.config.getTimeToLiveSeconds());
 		}
 	}
 
@@ -160,7 +184,7 @@ public final class RedisChatMemoryRepository implements ChatMemoryRepository, Ad
 	 */
 	private long getNextTimestampForConversation(String conversationId) {
 		// Create a Redis key specifically for tracking the sequence
-		String sequenceKey = String.format("%scounter:%s", config.getKeyPrefix(), escapeKey(conversationId));
+		String sequenceKey = String.format("%scounter:%s", this.config.getKeyPrefix(), escapeKey(conversationId));
 
 		try {
 			// Get the current time as base timestamp
@@ -172,18 +196,18 @@ public final class RedisChatMemoryRepository implements ChatMemoryRepository, Ad
 					+ "return redis.call('INCR', KEYS[1])";
 
 			// Execute the script atomically
-			Object result = jedis.eval(script, java.util.Collections.singletonList(sequenceKey),
+			Object result = this.jedisClient.eval(script, java.util.Collections.singletonList(sequenceKey),
 					java.util.Collections.singletonList(String.valueOf(baseTimestamp)));
 
 			long nextTimestamp = Long.parseLong(result.toString());
 
 			// Set expiration on the counter key (same as the messages)
-			if (config.getTimeToLiveSeconds() != -1) {
-				jedis.expire(sequenceKey, config.getTimeToLiveSeconds());
+			if (this.config.getTimeToLiveSeconds() != -1) {
+				this.jedisClient.expire(sequenceKey, this.config.getTimeToLiveSeconds());
 			}
 
 			if (logger.isDebugEnabled()) {
-				logger.debug("Generated atomic timestamp {} for conversation {}", nextTimestamp, conversationId);
+				logger.debug("Generated atomic timestamp " + nextTimestamp + " for conversation " + conversationId);
 			}
 
 			return nextTimestamp;
@@ -191,15 +215,17 @@ public final class RedisChatMemoryRepository implements ChatMemoryRepository, Ad
 
 		catch (Exception e) {
 			// Log error and fall back to current timestamp with nanoTime for uniqueness
-			logger.warn("Error getting atomic timestamp for conversation {}, using fallback: {}", conversationId,
-					e.getMessage());
+			if (logger.isWarnEnabled()) {
+				logger.warn("Error getting atomic timestamp for conversation " + conversationId + ", using fallback: "
+						+ e.getMessage());
+			}
 			// Add nanoseconds to ensure uniqueness even in fallback scenario
 			return Instant.now().toEpochMilli() * 1000 + (System.nanoTime() % 1000);
 		}
 	}
 
 	public List<Message> get(String conversationId) {
-		return get(conversationId, config.getMaxMessagesPerConversation());
+		return get(conversationId, this.config.getMaxMessagesPerConversation());
 	}
 
 	public List<Message> get(String conversationId, int lastN) {
@@ -211,15 +237,15 @@ public final class RedisChatMemoryRepository implements ChatMemoryRepository, Ad
 				Values.tags(RediSearchUtil.escape(conversationId)));
 		Query query = new Query(queryNode.toString()).setSortBy("timestamp", true).limit(0, lastN);
 
-		SearchResult result = jedis.ftSearch(config.getIndexName(), query);
+		SearchResult result = this.jedisClient.ftSearch(this.config.getIndexName(), query);
 
 		if (logger.isDebugEnabled()) {
-			logger.debug("Redis search for conversation {} returned {} results", conversationId,
-					result.getDocuments().size());
+			logger.debug("Redis search for conversation " + conversationId + " returned " + result.getDocuments().size()
+					+ " results");
 			result.getDocuments().forEach(doc -> {
 				if (doc.get("$") != null) {
 					JsonObject json = gson.fromJson(doc.getString("$"), JsonObject.class);
-					logger.debug("Document: {}", json);
+					logger.debug("Document: " + json);
 				}
 			});
 		}
@@ -229,7 +255,7 @@ public final class RedisChatMemoryRepository implements ChatMemoryRepository, Ad
 			if (doc.get("$") != null) {
 				JsonObject json = gson.fromJson(doc.getString("$"), JsonObject.class);
 				if (logger.isDebugEnabled()) {
-					logger.debug("Processing JSON document: {}", json);
+					logger.debug("Processing JSON document: " + json);
 				}
 
 				String type = json.get("type").getAsString();
@@ -239,14 +265,13 @@ public final class RedisChatMemoryRepository implements ChatMemoryRepository, Ad
 				Map<String, Object> metadata = new HashMap<>();
 				if (json.has("metadata") && json.get("metadata").isJsonObject()) {
 					JsonObject metadataJson = json.getAsJsonObject("metadata");
-					metadataJson.entrySet().forEach(entry -> {
-						metadata.put(entry.getKey(), gson.fromJson(entry.getValue(), Object.class));
-					});
+					metadataJson.entrySet()
+						.forEach(entry -> metadata.put(entry.getKey(), gson.fromJson(entry.getValue(), Object.class)));
 				}
 
 				if (MessageType.ASSISTANT.toString().equals(type)) {
 					if (logger.isDebugEnabled()) {
-						logger.debug("Creating AssistantMessage with content: {}", content);
+						logger.debug("Creating AssistantMessage with content: " + content);
 					}
 
 					// Handle tool calls if present
@@ -261,83 +286,7 @@ public final class RedisChatMemoryRepository implements ChatMemoryRepository, Ad
 									toolCallJson.has("arguments") ? toolCallJson.get("arguments").getAsString() : ""));
 						});
 					}
-
-					// Handle media if present
-					List<Media> media = new ArrayList<>();
-					if (json.has("media") && json.get("media").isJsonArray()) {
-						JsonArray mediaArray = json.getAsJsonArray("media");
-						for (JsonElement mediaElement : mediaArray) {
-							JsonObject mediaJson = mediaElement.getAsJsonObject();
-
-							// Extract required media properties
-							String mediaId = mediaJson.has("id") ? mediaJson.get("id").getAsString() : null;
-							String mediaName = mediaJson.has("name") ? mediaJson.get("name").getAsString() : null;
-							String mimeTypeString = mediaJson.has("mimeType") ? mediaJson.get("mimeType").getAsString()
-									: null;
-
-							if (mimeTypeString != null) {
-								MimeType mimeType = MimeType.valueOf(mimeTypeString);
-								Media.Builder mediaBuilder = Media.builder().mimeType(mimeType);
-
-								// Set optional properties if present
-								if (mediaId != null) {
-									mediaBuilder.id(mediaId);
-								}
-
-								if (mediaName != null) {
-									mediaBuilder.name(mediaName);
-								}
-
-								// Handle data based on its type
-								if (mediaJson.has("data")) {
-									JsonElement dataElement = mediaJson.get("data");
-									if (dataElement.isJsonPrimitive() && dataElement.getAsJsonPrimitive().isString()) {
-										String dataString = dataElement.getAsString();
-
-										// Check if data is Base64-encoded
-										if (mediaJson.has("dataType")
-												&& "base64".equals(mediaJson.get("dataType").getAsString())) {
-											// Decode Base64 string to byte array
-											try {
-												byte[] decodedBytes = Base64.getDecoder().decode(dataString);
-												mediaBuilder.data(decodedBytes);
-											}
-
-											catch (IllegalArgumentException e) {
-												logger.warn("Failed to decode Base64 data, storing as string", e);
-												mediaBuilder.data(dataString);
-											}
-										}
-
-										else {
-											// Handle URL/URI data
-											try {
-												mediaBuilder.data(URI.create(dataString));
-											}
-
-											catch (IllegalArgumentException e) {
-												// Not a valid URI, store as string
-												mediaBuilder.data(dataString);
-											}
-										}
-									}
-
-									else if (dataElement.isJsonArray()) {
-										// For backward compatibility - handle byte array
-										// data stored as JSON array
-										JsonArray dataArray = dataElement.getAsJsonArray();
-										byte[] byteArray = new byte[dataArray.size()];
-										for (int i = 0; i < dataArray.size(); i++) {
-											byteArray[i] = dataArray.get(i).getAsByte();
-										}
-										mediaBuilder.data(byteArray);
-									}
-								}
-
-								media.add(mediaBuilder.build());
-							}
-						}
-					}
+					List<Media> media = parseMedia(json);
 
 					AssistantMessage assistantMessage = AssistantMessage.builder()
 						.content(content)
@@ -350,91 +299,17 @@ public final class RedisChatMemoryRepository implements ChatMemoryRepository, Ad
 
 				else if (MessageType.USER.toString().equals(type)) {
 					if (logger.isDebugEnabled()) {
-						logger.debug("Creating UserMessage with content: {}", content);
+						logger.debug("Creating UserMessage with content: " + content);
 					}
 
 					// Create a UserMessage with the builder to properly set metadata
-					List<Media> userMedia = new ArrayList<>();
-					if (json.has("media") && json.get("media").isJsonArray()) {
-						JsonArray mediaArray = json.getAsJsonArray("media");
-						for (JsonElement mediaElement : mediaArray) {
-							JsonObject mediaJson = mediaElement.getAsJsonObject();
-
-							// Extract required media properties
-							String mediaId = mediaJson.has("id") ? mediaJson.get("id").getAsString() : null;
-							String mediaName = mediaJson.has("name") ? mediaJson.get("name").getAsString() : null;
-							String mimeTypeString = mediaJson.has("mimeType") ? mediaJson.get("mimeType").getAsString()
-									: null;
-
-							if (mimeTypeString != null) {
-								MimeType mimeType = MimeType.valueOf(mimeTypeString);
-								Media.Builder mediaBuilder = Media.builder().mimeType(mimeType);
-
-								// Set optional properties if present
-								if (mediaId != null) {
-									mediaBuilder.id(mediaId);
-								}
-
-								if (mediaName != null) {
-									mediaBuilder.name(mediaName);
-								}
-
-								// Handle data based on its type and markers
-								if (mediaJson.has("data")) {
-									JsonElement dataElement = mediaJson.get("data");
-									if (dataElement.isJsonPrimitive() && dataElement.getAsJsonPrimitive().isString()) {
-										String dataString = dataElement.getAsString();
-
-										// Check if data is Base64-encoded
-										if (mediaJson.has("dataType")
-												&& "base64".equals(mediaJson.get("dataType").getAsString())) {
-											// Decode Base64 string to byte array
-											try {
-												byte[] decodedBytes = Base64.getDecoder().decode(dataString);
-												mediaBuilder.data(decodedBytes);
-											}
-
-											catch (IllegalArgumentException e) {
-												logger.warn("Failed to decode Base64 data, storing as string", e);
-												mediaBuilder.data(dataString);
-											}
-										}
-
-										else {
-											// Handle URL/URI data
-											try {
-												mediaBuilder.data(URI.create(dataString));
-											}
-
-											catch (IllegalArgumentException e) {
-												// Not a valid URI, store as string
-												mediaBuilder.data(dataString);
-											}
-										}
-									}
-
-									else if (dataElement.isJsonArray()) {
-										// For backward compatibility - handle byte array
-										// data stored as JSON array
-										JsonArray dataArray = dataElement.getAsJsonArray();
-										byte[] byteArray = new byte[dataArray.size()];
-										for (int i = 0; i < dataArray.size(); i++) {
-											byteArray[i] = dataArray.get(i).getAsByte();
-										}
-										mediaBuilder.data(byteArray);
-									}
-								}
-
-								userMedia.add(mediaBuilder.build());
-							}
-						}
-					}
+					List<Media> userMedia = parseMedia(json);
 					messages.add(UserMessage.builder().text(content).metadata(metadata).media(userMedia).build());
 				}
 
 				else if (MessageType.SYSTEM.toString().equals(type)) {
 					if (logger.isDebugEnabled()) {
-						logger.debug("Creating SystemMessage with content: {}", content);
+						logger.debug("Creating SystemMessage with content: " + content);
 					}
 
 					messages.add(SystemMessage.builder().text(content).metadata(metadata).build());
@@ -442,7 +317,7 @@ public final class RedisChatMemoryRepository implements ChatMemoryRepository, Ad
 
 				else if (MessageType.TOOL.toString().equals(type)) {
 					if (logger.isDebugEnabled()) {
-						logger.debug("Creating ToolResponseMessage with content: {}", content);
+						logger.debug("Creating ToolResponseMessage with content: " + content);
 					}
 
 					// Extract tool responses
@@ -465,15 +340,17 @@ public final class RedisChatMemoryRepository implements ChatMemoryRepository, Ad
 				}
 				// Add handling for other message types if needed
 				else {
-					logger.warn("Unknown message type: {}", type);
+					if (logger.isWarnEnabled()) {
+						logger.warn("Unknown message type: " + type);
+					}
 				}
 			}
 		});
 
 		if (logger.isDebugEnabled()) {
-			logger.debug("Returning {} messages for conversation {}", messages.size(), conversationId);
-			messages.forEach(message -> logger.debug("Message type: {}, content: {}, class: {}",
-					message.getMessageType(), message.getText(), message.getClass().getSimpleName()));
+			logger.debug("Returning " + messages.size() + " messages for conversation " + conversationId);
+			messages.forEach(message -> logger.debug("Message type: " + message.getMessageType() + ", content: "
+					+ message.getText() + ", class: " + message.getClass().getSimpleName()));
 		}
 
 		return messages;
@@ -486,9 +363,9 @@ public final class RedisChatMemoryRepository implements ChatMemoryRepository, Ad
 		QueryNode queryNode = QueryBuilders.intersect("conversation_id",
 				Values.tags(RediSearchUtil.escape(conversationId)));
 		Query query = new Query(queryNode.toString());
-		SearchResult result = jedis.ftSearch(config.getIndexName(), query);
+		SearchResult result = this.jedisClient.ftSearch(this.config.getIndexName(), query);
 
-		try (Pipeline pipeline = jedis.pipelined()) {
+		try (Pipeline pipeline = this.jedisClient.pipelined()) {
 			result.getDocuments().forEach(doc -> pipeline.del(doc.getId()));
 			pipeline.sync();
 		}
@@ -496,7 +373,7 @@ public final class RedisChatMemoryRepository implements ChatMemoryRepository, Ad
 
 	private void initializeSchema() {
 		try {
-			if (!jedis.ftList().contains(config.getIndexName())) {
+			if (!this.jedisClient.ftList().contains(this.config.getIndexName())) {
 				List<SchemaField> schemaFields = new ArrayList<>();
 
 				// Basic fields for all messages - using schema field objects
@@ -506,9 +383,9 @@ public final class RedisChatMemoryRepository implements ChatMemoryRepository, Ad
 				schemaFields.add(new NumericField("$.timestamp").as("timestamp"));
 
 				// Add metadata fields based on user-provided schema or default to text
-				if (config.getMetadataFields() != null && !config.getMetadataFields().isEmpty()) {
+				if (this.config.getMetadataFields() != null && !this.config.getMetadataFields().isEmpty()) {
 					// User has provided a metadata schema - use it
-					for (Map<String, String> fieldDef : config.getMetadataFields()) {
+					for (Map<String, String> fieldDef : this.config.getMetadataFields()) {
 						String fieldName = fieldDef.get("name");
 						String fieldType = fieldDef.getOrDefault("type", "text");
 						String jsonPath = "$.metadata." + fieldName;
@@ -539,9 +416,9 @@ public final class RedisChatMemoryRepository implements ChatMemoryRepository, Ad
 				// Create the index with the defined schema
 				FTCreateParams indexParams = FTCreateParams.createParams()
 					.on(IndexDataType.JSON)
-					.prefix(config.getKeyPrefix());
+					.prefix(this.config.getKeyPrefix());
 
-				String response = jedis.ftCreate(config.getIndexName(), indexParams,
+				String response = this.jedisClient.ftCreate(this.config.getIndexName(), indexParams,
 						schemaFields.toArray(new SchemaField[0]));
 
 				if (!response.equals("OK")) {
@@ -549,27 +426,27 @@ public final class RedisChatMemoryRepository implements ChatMemoryRepository, Ad
 				}
 
 				if (logger.isDebugEnabled()) {
-					logger.debug("Created Redis search index '{}' with {} schema fields", config.getIndexName(),
-							schemaFields.size());
+					logger.debug("Created Redis search index '" + this.config.getIndexName() + "' with "
+							+ schemaFields.size() + " schema fields");
 				}
 			}
 
 			else if (logger.isDebugEnabled()) {
-				logger.debug("Redis search index '{}' already exists", config.getIndexName());
+				logger.debug("Redis search index '" + this.config.getIndexName() + "' already exists");
 			}
 		}
 
 		catch (Exception e) {
-			logger.error("Failed to initialize Redis schema: {}", e.getMessage());
-			if (logger.isDebugEnabled()) {
-				logger.debug("Error details", e);
+			if (logger.isErrorEnabled()) {
+				logger.error("Failed to initialize Redis schema: " + e.getMessage());
 			}
+			logger.debug("Error details", e);
 			throw new IllegalStateException("Could not initialize Redis schema", e);
 		}
 	}
 
 	private String createKey(String conversationId, long timestamp) {
-		return String.format("%s%s:%d", config.getKeyPrefix(), escapeKey(conversationId), timestamp);
+		return String.format("%s%s:%d", this.config.getKeyPrefix(), escapeKey(conversationId), timestamp);
 	}
 
 	private Map<String, Object> createMessageDocument(String conversationId, Message message) {
@@ -661,9 +538,9 @@ public final class RedisChatMemoryRepository implements ChatMemoryRepository, Ad
 		// Use Redis aggregation to get distinct conversation_ids
 		AggregationBuilder aggregation = new AggregationBuilder("*")
 			.groupBy("@conversation_id", Reducers.count().as("count"))
-			.limit(0, config.getMaxConversationIds()); // Use configured limit
+			.limit(0, this.config.getMaxConversationIds()); // Use configured limit
 
-		AggregationResult result = jedis.ftAggregate(config.getIndexName(), aggregation);
+		AggregationResult result = this.jedisClient.ftAggregate(this.config.getIndexName(), aggregation);
 
 		List<String> conversationIds = new ArrayList<>();
 		result.getResults().forEach(row -> {
@@ -674,8 +551,8 @@ public final class RedisChatMemoryRepository implements ChatMemoryRepository, Ad
 		});
 
 		if (logger.isDebugEnabled()) {
-			logger.debug("Found {} unique conversation IDs using Redis aggregation", conversationIds.size());
-			conversationIds.forEach(id -> logger.debug("Conversation ID: {}", id));
+			logger.debug("Found " + conversationIds.size() + " unique conversation IDs using Redis aggregation");
+			conversationIds.forEach(id -> logger.debug("Conversation ID: " + id));
 		}
 
 		return conversationIds;
@@ -690,7 +567,7 @@ public final class RedisChatMemoryRepository implements ChatMemoryRepository, Ad
 	@Override
 	public List<Message> findByConversationId(String conversationId) {
 		// Reuse existing get method with the configured limit
-		return get(conversationId, config.getMaxMessagesPerConversation());
+		return get(conversationId, this.config.getMaxMessagesPerConversation());
 	}
 
 	@Override
@@ -715,7 +592,7 @@ public final class RedisChatMemoryRepository implements ChatMemoryRepository, Ad
 	 * @return the index name
 	 */
 	public String getIndexName() {
-		return config.getIndexName();
+		return this.config.getIndexName();
 	}
 
 	@Override
@@ -730,10 +607,10 @@ public final class RedisChatMemoryRepository implements ChatMemoryRepository, Ad
 		Query query = new Query(queryNode.toString()).setSortBy("timestamp", true).limit(0, limit);
 
 		if (logger.isDebugEnabled()) {
-			logger.debug("Searching for messages with content pattern '{}' with limit {}", contentPattern, limit);
+			logger.debug("Searching for messages with content pattern '" + contentPattern + "' with limit " + limit);
 		}
 
-		SearchResult result = jedis.ftSearch(config.getIndexName(), query);
+		SearchResult result = this.jedisClient.ftSearch(this.config.getIndexName(), query);
 		return processSearchResult(result);
 	}
 
@@ -747,10 +624,10 @@ public final class RedisChatMemoryRepository implements ChatMemoryRepository, Ad
 		Query query = new Query(queryNode.toString()).setSortBy("timestamp", true).limit(0, limit);
 
 		if (logger.isDebugEnabled()) {
-			logger.debug("Searching for messages of type {} with limit {}", messageType, limit);
+			logger.debug("Searching for messages of type " + messageType + " with limit " + limit);
 		}
 
-		SearchResult result = jedis.ftSearch(config.getIndexName(), query);
+		SearchResult result = this.jedisClient.ftSearch(this.config.getIndexName(), query);
 		return processSearchResult(result);
 	}
 
@@ -785,11 +662,11 @@ public final class RedisChatMemoryRepository implements ChatMemoryRepository, Ad
 		Query query = new Query(finalQuery.toString()).setSortBy("timestamp", true).limit(0, limit);
 
 		if (logger.isDebugEnabled()) {
-			logger.debug("Searching for messages in time range from {} to {} with limit {}, query: '{}'", fromTime,
-					toTime, limit, finalQuery);
+			logger.debug("Searching for messages in time range from " + fromTime + " to " + toTime + " with limit "
+					+ limit + ", query: '" + finalQuery + "'");
 		}
 
-		SearchResult result = jedis.ftSearch(config.getIndexName(), query);
+		SearchResult result = this.jedisClient.ftSearch(this.config.getIndexName(), query);
 		return processSearchResult(result);
 	}
 
@@ -804,8 +681,8 @@ public final class RedisChatMemoryRepository implements ChatMemoryRepository, Ad
 		boolean isFieldIndexed = false;
 		String fieldType = "text";
 
-		if (config.getMetadataFields() != null) {
-			for (Map<String, String> fieldDef : config.getMetadataFields()) {
+		if (this.config.getMetadataFields() != null) {
+			for (Map<String, String> fieldDef : this.config.getMetadataFields()) {
 				if (metadataKey.equals(fieldDef.get("name"))) {
 					isFieldIndexed = true;
 					fieldType = fieldDef.getOrDefault("type", "text");
@@ -859,14 +736,14 @@ public final class RedisChatMemoryRepository implements ChatMemoryRepository, Ad
 		Query query = new Query(queryNode.toString()).setSortBy("timestamp", true).limit(0, limit);
 
 		if (logger.isDebugEnabled()) {
-			logger.debug("Searching for messages with metadata {}={}, query: '{}', limit: {}", metadataKey,
-					metadataValue, queryNode, limit);
+			logger.debug("Searching for messages with metadata " + metadataKey + "=" + metadataValue + ", query: '"
+					+ queryNode + "', limit: " + limit);
 		}
 
-		SearchResult result = jedis.ftSearch(config.getIndexName(), query);
+		SearchResult result = this.jedisClient.ftSearch(this.config.getIndexName(), query);
 
 		if (logger.isDebugEnabled()) {
-			logger.debug("Search returned {} results", result.getTotalResults());
+			logger.debug("Search returned " + result.getTotalResults() + " results");
 		}
 		return processSearchResult(result);
 	}
@@ -885,7 +762,7 @@ public final class RedisChatMemoryRepository implements ChatMemoryRepository, Ad
 																							// ascending
 
 		if (logger.isDebugEnabled()) {
-			logger.debug("Executing custom query '{}' with limit {}", query, limit);
+			logger.debug("Executing custom query '" + query + "' with limit " + limit);
 		}
 
 		return executeSearchQuery(redisQuery);
@@ -918,7 +795,7 @@ public final class RedisChatMemoryRepository implements ChatMemoryRepository, Ad
 		}
 
 		if (logger.isDebugEnabled()) {
-			logger.debug("Search returned {} messages", messages.size());
+			logger.debug("Search returned " + messages.size() + " messages");
 		}
 
 		return messages;
@@ -934,15 +811,15 @@ public final class RedisChatMemoryRepository implements ChatMemoryRepository, Ad
 	private List<MessageWithConversation> executeSearchQuery(Query query) {
 		try {
 			// Execute the search
-			SearchResult result = jedis.ftSearch(config.getIndexName(), query);
+			SearchResult result = this.jedisClient.ftSearch(this.config.getIndexName(), query);
 			return processSearchResult(result);
 		}
 
 		catch (Exception e) {
-			logger.error("Error executing query '{}': {}", query, e.getMessage());
-			if (logger.isTraceEnabled()) {
-				logger.debug("Error details", e);
+			if (logger.isErrorEnabled()) {
+				logger.error("Error executing query '" + query + "': " + e.getMessage());
 			}
+			logger.debug("Error details", e);
 			return Collections.emptyList();
 		}
 	}
@@ -961,9 +838,8 @@ public final class RedisChatMemoryRepository implements ChatMemoryRepository, Ad
 		Map<String, Object> metadata = new HashMap<>();
 		if (json.has("metadata") && json.get("metadata").isJsonObject()) {
 			JsonObject metadataJson = json.getAsJsonObject("metadata");
-			metadataJson.entrySet().forEach(entry -> {
-				metadata.put(entry.getKey(), gson.fromJson(entry.getValue(), Object.class));
-			});
+			metadataJson.entrySet()
+				.forEach(entry -> metadata.put(entry.getKey(), gson.fromJson(entry.getValue(), Object.class)));
 		}
 
 		if (MessageType.ASSISTANT.toString().equals(type)) {
@@ -979,82 +855,7 @@ public final class RedisChatMemoryRepository implements ChatMemoryRepository, Ad
 							toolCallJson.has("arguments") ? toolCallJson.get("arguments").getAsString() : ""));
 				});
 			}
-
-			// Handle media if present
-			List<Media> media = new ArrayList<>();
-			if (json.has("media") && json.get("media").isJsonArray()) {
-				JsonArray mediaArray = json.getAsJsonArray("media");
-				for (JsonElement mediaElement : mediaArray) {
-					JsonObject mediaJson = mediaElement.getAsJsonObject();
-
-					// Extract required media properties
-					String mediaId = mediaJson.has("id") ? mediaJson.get("id").getAsString() : null;
-					String mediaName = mediaJson.has("name") ? mediaJson.get("name").getAsString() : null;
-					String mimeTypeString = mediaJson.has("mimeType") ? mediaJson.get("mimeType").getAsString() : null;
-
-					if (mimeTypeString != null) {
-						MimeType mimeType = MimeType.valueOf(mimeTypeString);
-						Media.Builder mediaBuilder = Media.builder().mimeType(mimeType);
-
-						// Set optional properties if present
-						if (mediaId != null) {
-							mediaBuilder.id(mediaId);
-						}
-
-						if (mediaName != null) {
-							mediaBuilder.name(mediaName);
-						}
-
-						// Handle data based on its type
-						if (mediaJson.has("data")) {
-							JsonElement dataElement = mediaJson.get("data");
-							if (dataElement.isJsonPrimitive() && dataElement.getAsJsonPrimitive().isString()) {
-								String dataString = dataElement.getAsString();
-
-								// Check if data is Base64-encoded
-								if (mediaJson.has("dataType")
-										&& "base64".equals(mediaJson.get("dataType").getAsString())) {
-									// Decode Base64 string to byte array
-									try {
-										byte[] decodedBytes = Base64.getDecoder().decode(dataString);
-										mediaBuilder.data(decodedBytes);
-									}
-
-									catch (IllegalArgumentException e) {
-										logger.warn("Failed to decode Base64 data, storing as string", e);
-										mediaBuilder.data(dataString);
-									}
-								}
-
-								else {
-									// Handle URL/URI data
-									try {
-										mediaBuilder.data(URI.create(dataString));
-									}
-
-									catch (IllegalArgumentException e) {
-										// Not a valid URI, store as string
-										mediaBuilder.data(dataString);
-									}
-								}
-							}
-
-							else if (dataElement.isJsonArray()) {
-								// For backward compatibility - handle byte array data
-								// stored as JSON array
-								JsonArray dataArray = dataElement.getAsJsonArray();
-								byte[] byteArray = new byte[dataArray.size()];
-								for (int i = 0; i < dataArray.size(); i++) {
-									byteArray[i] = dataArray.get(i).getAsByte();
-								}
-								mediaBuilder.data(byteArray);
-							}
-						}
-
-						media.add(mediaBuilder.build());
-					}
-				}
-			}
+			List<Media> media = parseMedia(json);
 
 			return AssistantMessage.builder()
 				.content(content)
@@ -1066,80 +867,7 @@ public final class RedisChatMemoryRepository implements ChatMemoryRepository, Ad
 
 		else if (MessageType.USER.toString().equals(type)) {
 			// Create a UserMessage with the builder to properly set metadata
-			List<Media> userMedia = new ArrayList<>();
-			if (json.has("media") && json.get("media").isJsonArray()) {
-				JsonArray mediaArray = json.getAsJsonArray("media");
-				for (JsonElement mediaElement : mediaArray) {
-					JsonObject mediaJson = mediaElement.getAsJsonObject();
-
-					// Extract required media properties
-					String mediaId = mediaJson.has("id") ? mediaJson.get("id").getAsString() : null;
-					String mediaName = mediaJson.has("name") ? mediaJson.get("name").getAsString() : null;
-					String mimeTypeString = mediaJson.has("mimeType") ? mediaJson.get("mimeType").getAsString() : null;
-
-					if (mimeTypeString != null) {
-						MimeType mimeType = MimeType.valueOf(mimeTypeString);
-						Media.Builder mediaBuilder = Media.builder().mimeType(mimeType);
-
-						// Set optional properties if present
-						if (mediaId != null) {
-							mediaBuilder.id(mediaId);
-						}
-
-						if (mediaName != null) {
-							mediaBuilder.name(mediaName);
-						}
-
-						// Handle data based on its type and markers
-						if (mediaJson.has("data")) {
-							JsonElement dataElement = mediaJson.get("data");
-							if (dataElement.isJsonPrimitive() && dataElement.getAsJsonPrimitive().isString()) {
-								String dataString = dataElement.getAsString();
-
-								// Check if data is Base64-encoded
-								if (mediaJson.has("dataType")
-										&& "base64".equals(mediaJson.get("dataType").getAsString())) {
-									// Decode Base64 string to byte array
-									try {
-										byte[] decodedBytes = Base64.getDecoder().decode(dataString);
-										mediaBuilder.data(decodedBytes);
-									}
-
-									catch (IllegalArgumentException e) {
-										logger.warn("Failed to decode Base64 data, storing as string", e);
-										mediaBuilder.data(dataString);
-									}
-								}
-
-								else {
-									// Handle URL/URI data
-									try {
-										mediaBuilder.data(URI.create(dataString));
-									}
-
-									catch (IllegalArgumentException e) {
-										// Not a valid URI, store as string
-										mediaBuilder.data(dataString);
-									}
-								}
-							}
-
-							else if (dataElement.isJsonArray()) {
-								// For backward compatibility - handle byte array data
-								// stored as JSON array
-								JsonArray dataArray = dataElement.getAsJsonArray();
-								byte[] byteArray = new byte[dataArray.size()];
-								for (int i = 0; i < dataArray.size(); i++) {
-									byteArray[i] = dataArray.get(i).getAsByte();
-								}
-								mediaBuilder.data(byteArray);
-							}
-						}
-
-						userMedia.add(mediaBuilder.build());
-					}
-				}
-			}
+			List<Media> userMedia = parseMedia(json);
 			return UserMessage.builder().text(content).metadata(metadata).media(userMedia).build();
 		}
 
@@ -1168,16 +896,84 @@ public final class RedisChatMemoryRepository implements ChatMemoryRepository, Ad
 		}
 
 		// For unknown message types, return a generic UserMessage
-		logger.warn("Unknown message type: {}, returning generic UserMessage", type);
+		if (logger.isWarnEnabled()) {
+			logger.warn("Unknown message type: " + type + ", returning generic UserMessage");
+		}
 		return UserMessage.builder().text(content).metadata(metadata).build();
 	}
 
+	private List<Media> parseMedia(JsonObject json) {
+		List<Media> mediaList = new ArrayList<>();
+		if (json.has("media") && json.get("media").isJsonArray()) {
+			JsonArray mediaArray = json.getAsJsonArray("media");
+			for (JsonElement mediaElement : mediaArray) {
+				JsonObject mediaJson = mediaElement.getAsJsonObject();
+				String mimeTypeString = mediaJson.has("mimeType") ? mediaJson.get("mimeType").getAsString() : null;
+
+				if (mimeTypeString != null) {
+					MimeType mimeType = MimeType.valueOf(mimeTypeString);
+					Media.Builder mediaBuilder = Media.builder().mimeType(mimeType);
+
+					if (mediaJson.has("id")) {
+						mediaBuilder.id(mediaJson.get("id").getAsString());
+					}
+
+					if (mediaJson.has("name")) {
+						mediaBuilder.name(mediaJson.get("name").getAsString());
+					}
+
+					if (mediaJson.has("data")) {
+						parseMediaData(mediaJson, mediaBuilder);
+					}
+
+					mediaList.add(mediaBuilder.build());
+				}
+			}
+		}
+		return mediaList;
+	}
+
+	private void parseMediaData(JsonObject mediaJson, Media.Builder mediaBuilder) {
+		JsonElement dataElement = mediaJson.get("data");
+		if (dataElement.isJsonPrimitive() && dataElement.getAsJsonPrimitive().isString()) {
+			String dataString = dataElement.getAsString();
+
+			if (mediaJson.has("dataType") && "base64".equals(mediaJson.get("dataType").getAsString())) {
+				try {
+					byte[] decodedBytes = Base64.getDecoder().decode(dataString);
+					mediaBuilder.data(decodedBytes);
+				}
+				catch (IllegalArgumentException e) {
+					logger.warn("Failed to decode Base64 data, storing as string", e);
+					mediaBuilder.data(dataString);
+				}
+			}
+			else {
+				try {
+					mediaBuilder.data(URI.create(dataString));
+				}
+				catch (IllegalArgumentException e) {
+					mediaBuilder.data(dataString);
+				}
+			}
+		}
+		else if (dataElement.isJsonArray()) {
+			JsonArray dataArray = dataElement.getAsJsonArray();
+			byte[] byteArray = new byte[dataArray.size()];
+			for (int i = 0; i < dataArray.size(); i++) {
+				byteArray[i] = dataArray.get(i).getAsByte();
+			}
+			mediaBuilder.data(byteArray);
+		}
+	}
+
 	/**
-	 * Inner static builder class for constructing instances of {@link RedisChatMemory}.
+	 * Inner static builder class for constructing instances of
+	 * {@link RedisChatMemoryRepository}.
 	 */
 	public static class Builder {
 
-		private @Nullable JedisPooled jedisClient;
+		private @Nullable RedisClient jedisClient;
 
 		private String indexName = RedisChatMemoryConfig.DEFAULT_INDEX_NAME;
 
@@ -1194,11 +990,11 @@ public final class RedisChatMemoryRepository implements ChatMemoryRepository, Ad
 		private List<Map<String, String>> metadataFields = Collections.emptyList();
 
 		/**
-		 * Sets the JedisPooled client.
-		 * @param jedisClient the JedisPooled client to use
+		 * Sets the RedisClient client.
+		 * @param jedisClient the RedisClient client to use
 		 * @return this builder
 		 */
-		public Builder jedisClient(final JedisPooled jedisClient) {
+		public Builder jedisClient(final RedisClient jedisClient) {
 			this.jedisClient = jedisClient;
 			return this;
 		}

@@ -21,9 +21,9 @@ import java.util.Map;
 import java.util.function.Function;
 import java.util.stream.Collectors;
 
+import org.apache.commons.logging.Log;
+import org.apache.commons.logging.LogFactory;
 import org.jspecify.annotations.Nullable;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 
 import org.springframework.ai.chat.prompt.PromptTemplate;
 import org.springframework.ai.document.Document;
@@ -70,7 +70,7 @@ import org.springframework.util.Assert;
  */
 public final class ContextualQueryAugmenter implements QueryAugmenter {
 
-	private static final Logger logger = LoggerFactory.getLogger(ContextualQueryAugmenter.class);
+	private static final Log logger = LogFactory.getLog(ContextualQueryAugmenter.class);
 
 	/** 默认增强模板：要求模型仅基于上下文作答，是 RAG 防幻觉的标准范式。 */
 	private static final PromptTemplate DEFAULT_PROMPT_TEMPLATE = new PromptTemplate("""

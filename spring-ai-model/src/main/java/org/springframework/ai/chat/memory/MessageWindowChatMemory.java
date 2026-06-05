@@ -37,21 +37,19 @@ import org.springframework.util.Assert;
  *
  * <h2>核心策略：滑动窗口（Sliding Window）</h2>
  * <p>
- * 这是 Spring AI 提供的<b>默认 {@link ChatMemory} 策略实现</b>。它把"对话能记住多少"
- * 简化为一个数字 {@link #maxMessages}：一旦总消息数超过窗口，就丢弃最早的非 system 消息。
- * 这种策略的取舍：
+ * 这是 Spring AI 提供的<b>默认 {@link ChatMemory} 策略实现</b>。它把"对话能记住多少" 简化为一个数字
+ * {@link #maxMessages}：一旦总消息数超过窗口，就丢弃最早的非 system 消息。 这种策略的取舍：
  * <ul>
- *   <li>优点：实现简单、行为可预期、Token 成本可控；</li>
- *   <li>缺点：超出窗口的早期上下文会"失忆"，如需更长记忆请考虑摘要 / 向量检索类方案。</li>
+ * <li>优点：实现简单、行为可预期、Token 成本可控；</li>
+ * <li>缺点：超出窗口的早期上下文会"失忆"，如需更长记忆请考虑摘要 / 向量检索类方案。</li>
  * </ul>
  *
  * <h2>SystemMessage 的特殊处理</h2>
  * <p>
  * SystemMessage 通常是"角色设定 / 全局指令"，应在整段对话中保持有效，因此本实现：
  * <ol>
- *   <li><b>新增覆盖</b>：当本轮新增了一条新的 SystemMessage 时，旧的所有 SystemMessage 会被清理掉，
- *       避免角色设定层层叠加；</li>
- *   <li><b>淘汰豁免</b>：当总数超过窗口需要淘汰时，SystemMessage 不会被淘汰，只淘汰普通消息。</li>
+ * <li><b>新增覆盖</b>：当本轮新增了一条新的 SystemMessage 时，旧的所有 SystemMessage 会被清理掉， 避免角色设定层层叠加；</li>
+ * <li><b>淘汰豁免</b>：当总数超过窗口需要淘汰时，SystemMessage 不会被淘汰，只淘汰普通消息。</li>
  * </ol>
  *
  * @author Thomas Vitale
@@ -102,7 +100,6 @@ public final class MessageWindowChatMemory implements ChatMemory {
 
 	/**
 	 * 把"<b>已有历史</b>"和"<b>本轮新消息</b>"合并成最终要保存的列表，并应用窗口/SystemMessage 策略。
-	 *
 	 * @param memoryMessages 当前持久化的历史消息
 	 * @param newMessages 本轮要追加的新消息
 	 * @return 合并并裁剪后的最终消息列表

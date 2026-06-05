@@ -34,8 +34,8 @@ import oracle.sql.json.OracleJsonFactory;
 import oracle.sql.json.OracleJsonGenerator;
 import oracle.sql.json.OracleJsonObject;
 import oracle.sql.json.OracleJsonValue;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
+import org.apache.commons.logging.Log;
+import org.apache.commons.logging.LogFactory;
 
 import org.springframework.ai.document.Document;
 import org.springframework.ai.document.DocumentMetadata;
@@ -81,6 +81,7 @@ import org.springframework.util.StringUtils;
  * @author Christian Tzolov
  * @author Soby Chacko
  * @author Thomas Vitale
+ * @author chabinhwang
  */
 public class OracleVectorStore extends AbstractObservationVectorStore implements InitializingBean {
 
@@ -96,7 +97,7 @@ public class OracleVectorStore extends AbstractObservationVectorStore implements
 
 	public static final int DEFAULT_SEARCH_ACCURACY = -1;
 
-	private static final Logger logger = LoggerFactory.getLogger(OracleVectorStore.class);
+	private static final Log logger = LogFactory.getLog(OracleVectorStore.class);
 
 	private static final Map<OracleVectorStoreDistanceType, VectorStoreSimilarityMetric> SIMILARITY_TYPE_MAPPING = Map
 		.of(OracleVectorStoreDistanceType.COSINE, VectorStoreSimilarityMetric.COSINE,
@@ -177,7 +178,7 @@ public class OracleVectorStore extends AbstractObservationVectorStore implements
 				final Document document = documents.get(i);
 				final String content = document.getText();
 				final byte[] json = toJson(document.getMetadata());
-				final VECTOR embeddingVector = toVECTOR(embeddings.get(documents.indexOf(document)));
+				final VECTOR embeddingVector = toVECTOR(embeddings.get(i));
 
 				org.springframework.jdbc.core.StatementCreatorUtils.setParameterValue(ps, 1, Types.VARCHAR,
 						document.getId());
@@ -314,13 +315,19 @@ public class OracleVectorStore extends AbstractObservationVectorStore implements
 			String filterClause = this.filterExpressionConverter.convertExpression(filterExpression);
 			String sql = String.format("DELETE FROM %s WHERE %s", this.tableName, filterClause);
 
-			logger.debug("Executing delete with filter: {}", sql);
+			if (logger.isDebugEnabled()) {
+				logger.debug("Executing delete with filter: " + sql);
+			}
 
 			int deletedCount = this.jdbcTemplate.update(sql);
-			logger.debug("Deleted {} documents matching filter expression", deletedCount);
+			if (logger.isDebugEnabled()) {
+				logger.debug("Deleted " + deletedCount + " documents matching filter expression");
+			}
 		}
 		catch (Exception e) {
-			logger.error("Failed to delete documents by filter: {}", e.getMessage(), e);
+			if (logger.isErrorEnabled()) {
+				logger.error("Failed to delete documents by filter: " + e.getMessage(), e);
+			}
 			throw new IllegalStateException("Failed to delete documents by filter", e);
 		}
 	}
@@ -378,7 +385,9 @@ public class OracleVectorStore extends AbstractObservationVectorStore implements
 								this.distanceType == OracleVectorStore.OracleVectorStoreDistanceType.DOT ? ")/2" : "",
 								this.tableName, jsonPathFilter, request.getTopK(), this.searchAccuracy);
 
-				logger.debug("SQL query: {}", sql);
+				if (logger.isDebugEnabled()) {
+					logger.debug("SQL query: " + sql);
+				}
 
 				return this.jdbcTemplate.query(sql, new DocumentRowMapper(), embeddingVector);
 			}
@@ -397,7 +406,9 @@ public class OracleVectorStore extends AbstractObservationVectorStore implements
 						this.distanceType == OracleVectorStore.OracleVectorStoreDistanceType.DOT ? ")/2" : "",
 						this.tableName, jsonPathFilter, request.getTopK());
 
-				logger.debug("SQL query: {}", sql);
+				if (logger.isDebugEnabled()) {
+					logger.debug("SQL query: " + sql);
+				}
 
 				return this.jdbcTemplate.query(sql, new DocumentRowMapper(), embeddingVector);
 			}
@@ -453,7 +464,9 @@ public class OracleVectorStore extends AbstractObservationVectorStore implements
 												fetch APPROXIMATE first %d rows only WITH TARGET ACCURACY %d""",
 										this.tableName, jsonPathFilter, request.getTopK(), this.searchAccuracy));
 
-				logger.debug("SQL query: {}", sql);
+				if (logger.isDebugEnabled()) {
+					logger.debug("SQL query: " + sql);
+				}
 
 				return this.jdbcTemplate.query(sql, new DocumentRowMapper(), embeddingVector, embeddingVector,
 						distance);

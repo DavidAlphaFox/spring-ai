@@ -13,6 +13,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
 package org.springframework.ai.chat.memory.repository.redis;
 
 import java.util.List;
@@ -23,7 +24,7 @@ import com.redis.testcontainers.RedisContainer;
 import org.junit.jupiter.api.Test;
 import org.testcontainers.junit.jupiter.Container;
 import org.testcontainers.junit.jupiter.Testcontainers;
-import redis.clients.jedis.JedisPooled;
+import redis.clients.jedis.RedisClient;
 
 import org.springframework.ai.chat.messages.AssistantMessage;
 import org.springframework.ai.chat.messages.MessageType;
@@ -31,8 +32,6 @@ import org.springframework.ai.chat.messages.SystemMessage;
 import org.springframework.ai.chat.messages.ToolResponseMessage;
 import org.springframework.ai.chat.messages.UserMessage;
 import org.springframework.boot.SpringBootConfiguration;
-import org.springframework.boot.autoconfigure.EnableAutoConfiguration;
-import org.springframework.boot.jdbc.autoconfigure.DataSourceAutoConfiguration;
 import org.springframework.boot.test.context.runner.ApplicationContextRunner;
 import org.springframework.context.annotation.Bean;
 
@@ -42,6 +41,7 @@ import static org.assertj.core.api.Assertions.assertThat;
  * Integration tests for RedisChatMemoryRepository advanced query capabilities.
  *
  * @author Brian Sam-Bodden
+ * @author Yanming Zhou
  */
 @Testcontainers
 class RedisChatMemoryAdvancedQueryIT {
@@ -520,7 +520,6 @@ class RedisChatMemoryAdvancedQueryIT {
 	}
 
 	@SpringBootConfiguration
-	@EnableAutoConfiguration(exclude = { DataSourceAutoConfiguration.class })
 	static class TestApplication {
 
 		@Bean
@@ -535,7 +534,9 @@ class RedisChatMemoryAdvancedQueryIT {
 			String uniqueIndexName = "test-adv-app-" + System.currentTimeMillis();
 
 			return RedisChatMemoryRepository.builder()
-				.jedisClient(new JedisPooled(redisContainer.getHost(), redisContainer.getFirstMappedPort()))
+				.jedisClient(RedisClient.builder()
+					.hostAndPort(redisContainer.getHost(), redisContainer.getFirstMappedPort())
+					.build())
 				.indexName(uniqueIndexName)
 				.metadataFields(metadataFields)
 				.build();

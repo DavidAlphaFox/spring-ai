@@ -35,17 +35,14 @@ import org.springframework.util.CollectionUtils;
  * {@code ChatResponse} 是 {@link ChatModel} 调用的最终返回值，封装了：
  * <ul>
  * <li>一个或多个 {@link Generation}（候选结果列表，对应 OpenAI {@code n>1} 的场景）；</li>
- * <li>一个响应级元数据 {@link ChatResponseMetadata}，包含模型 ID、用量统计、
- * 限流信息、提示元数据等。</li>
+ * <li>一个响应级元数据 {@link ChatResponseMetadata}，包含模型 ID、用量统计、 限流信息、提示元数据等。</li>
  * </ul>
  *
  * <p>
- * 类被设计为不可变对象：构造时会通过 {@link List#copyOf(java.util.Collection)}
- * 复制一份候选列表的快照，避免外部修改污染响应。
+ * 类被设计为不可变对象：构造时会通过 {@link List#copyOf(java.util.Collection)} 复制一份候选列表的快照，避免外部修改污染响应。
  *
  * <p>
- * 同时提供 {@link Builder} 风格的构造方式，便于在测试、流式聚合
- * （{@link MessageAggregator}）等场景下灵活地组装响应。
+ * 同时提供 {@link Builder} 风格的构造方式，便于在测试、流式聚合 （{@link MessageAggregator}）等场景下灵活地组装响应。
  *
  * @author Christian Tzolov
  * @author Mark Pollack
@@ -78,8 +75,8 @@ public class ChatResponse implements ModelResponse<Generation> {
 	 * 行为：
 	 * <ul>
 	 * <li>{@code generations} 不允许为 {@code null}，会通过 {@link Assert} 校验；</li>
-	 * <li>{@code chatResponseMetadata} 若为 {@code null} 会被替换为一个空实例，
-	 * 保证 {@link #getMetadata()} 永不返回 {@code null}；</li>
+	 * <li>{@code chatResponseMetadata} 若为 {@code null} 会被替换为一个空实例， 保证
+	 * {@link #getMetadata()} 永不返回 {@code null}；</li>
 	 * <li>内部使用 {@link List#copyOf} 复制不可变快照，确保线程安全与不可变性。</li>
 	 * </ul>
 	 * @param generations 候选结果列表（不可为 null）
@@ -133,8 +130,8 @@ public class ChatResponse implements ModelResponse<Generation> {
 	/**
 	 * 判断模型是否在本次响应中请求执行工具（function / tool call）。
 	 * <p>
-	 * 只要任一候选 {@link Generation} 的 {@link AssistantMessage} 中含有 toolCall，
-	 * 即返回 {@code true}。常用于 ToolCallingManager 决定是否进入工具执行循环。
+	 * 只要任一候选 {@link Generation} 的 {@link AssistantMessage} 中含有 toolCall， 即返回
+	 * {@code true}。常用于 ToolCallingManager 决定是否进入工具执行循环。
 	 * @return 存在工具调用返回 {@code true}，否则 {@code false}
 	 */
 	public boolean hasToolCalls() {
@@ -147,8 +144,7 @@ public class ChatResponse implements ModelResponse<Generation> {
 	/**
 	 * 判断本次响应中是否存在某个候选的完成原因（finish reason）落在给定集合内。
 	 * <p>
-	 * 比较时不区分大小写。常用于 ChatClient / Advisor 链中检测 STOP、LENGTH、
-	 * TOOL_CALLS 等结束语义。
+	 * 比较时不区分大小写。常用于 ChatClient / Advisor 链中检测 STOP、LENGTH、 TOOL_CALLS 等结束语义。
 	 * @param finishReasons 期望匹配的完成原因集合（不可为 null）
 	 * @return 存在匹配返回 {@code true}，否则 {@code false}
 	 */
@@ -170,7 +166,7 @@ public class ChatResponse implements ModelResponse<Generation> {
 	}
 
 	@Override
-	public boolean equals(Object o) {
+	public boolean equals(@Nullable Object o) {
 		if (this == o) {
 			return true;
 		}
@@ -233,8 +229,7 @@ public class ChatResponse implements ModelResponse<Generation> {
 		/**
 		 * 用一个完整的 {@link ChatResponseMetadata} 覆盖当前元数据。
 		 * <p>
-		 * 复制其标准字段（model、id、rateLimit、usage、promptMetadata），同时遍历
-		 * 其扩展键值对一一注入子构建器。
+		 * 复制其标准字段（model、id、rateLimit、usage、promptMetadata），同时遍历 其扩展键值对一一注入子构建器。
 		 * @param other 待复制的元数据
 		 * @return 当前 Builder
 		 */
@@ -263,8 +258,7 @@ public class ChatResponse implements ModelResponse<Generation> {
 		}
 
 		/**
-		 * 完成构建。要求 {@code generations} 已被设置，否则抛出
-		 * {@link IllegalArgumentException}。
+		 * 完成构建。要求 {@code generations} 已被设置，否则抛出 {@link IllegalArgumentException}。
 		 * @return 不可变的 {@link ChatResponse} 实例
 		 */
 		public ChatResponse build() {

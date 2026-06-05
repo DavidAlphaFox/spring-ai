@@ -27,9 +27,8 @@ import org.springframework.util.Assert;
 /**
  * An in-memory implementation of {@link ChatMemoryRepository}.
  * <p>
- * 基于 {@link ConcurrentHashMap} 的<b>进程内</b>仓储实现。优点：零依赖、最低延迟，
- * 是开发、单测、Demo 的默认选择。缺点：进程重启即丢失、无法跨实例共享，
- * 因此<b>不适合生产环境</b>——生产建议改用 JDBC / Redis / Mongo 等持久化实现。
+ * 基于 {@link ConcurrentHashMap} 的<b>进程内</b>仓储实现。优点：零依赖、最低延迟， 是开发、单测、Demo
+ * 的默认选择。缺点：进程重启即丢失、无法跨实例共享， 因此<b>不适合生产环境</b>——生产建议改用 JDBC / Redis / Mongo 等持久化实现。
  *
  * @author Thomas Vitale
  * @since 1.0.0

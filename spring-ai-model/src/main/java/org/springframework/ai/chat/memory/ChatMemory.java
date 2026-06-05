@@ -26,20 +26,18 @@ import org.springframework.util.Assert;
  *
  * <h2>核心定位</h2>
  * <p>
- * {@code ChatMemory} 是 Spring AI 中"<b>会话记忆</b>"的高层抽象。它负责按
- * <b>会话 ID（conversationId）</b> 维护一段对话的消息列表，并对外提供
- * 添加 / 读取 / 清空三种操作。它<b>不直接</b>被业务代码使用，而是被
+ * {@code ChatMemory} 是 Spring AI 中"<b>会话记忆</b>"的高层抽象。它负责按 <b>会话 ID（conversationId）</b>
+ * 维护一段对话的消息列表，并对外提供 添加 / 读取 / 清空三种操作。它<b>不直接</b>被业务代码使用，而是被
  * {@code MessageChatMemoryAdvisor} 等 RAG/对话 Advisor 在每次请求前后调用：
  * <ul>
- *   <li>请求前：通过 {@link #get(String)} 读取历史消息，拼接到 Prompt；</li>
- *   <li>响应后：通过 {@link #add} 把新一轮的 user / assistant 消息回写。</li>
+ * <li>请求前：通过 {@link #get(String)} 读取历史消息，拼接到 Prompt；</li>
+ * <li>响应后：通过 {@link #add} 把新一轮的 user / assistant 消息回写。</li>
  * </ul>
  *
  * <h2>分层关系</h2>
  * <p>
- * {@code ChatMemory}（策略层，决定<i>保留哪些消息</i>，例如滑动窗口、摘要压缩等）
- * → {@link ChatMemoryRepository}（存储层，决定<i>消息存到哪里</i>，
- * 例如内存、JDBC、Redis、MongoDB、Cassandra 等）。
+ * {@code ChatMemory}（策略层，决定<i>保留哪些消息</i>，例如滑动窗口、摘要压缩等） →
+ * {@link ChatMemoryRepository}（存储层，决定<i>消息存到哪里</i>， 例如内存、JDBC、Redis、MongoDB、Cassandra 等）。
  * 同一个策略可以搭配不同存储，反之亦然。参考实现：{@link MessageWindowChatMemory}。
  *
  * @author Christian Tzolov
@@ -48,15 +46,12 @@ import org.springframework.util.Assert;
  */
 public interface ChatMemory {
 
-	/** 当 Advisor 上下文中没有显式提供会话 ID 时使用的兜底默认值。 */
-	String DEFAULT_CONVERSATION_ID = "default";
-
 	/**
 	 * The key to retrieve the chat memory conversation id from the context.
 	 * <p>
-	 * Advisor 链上下文（{@code Map<String, Object>}）中会话 ID 的固定 key。
-	 * 业务代码通过 {@code .advisors(a -> a.param(ChatMemory.CONVERSATION_ID, sessionId))}
-	 * 注入；记忆 Advisor 再用此 key 取出会话 ID 并定位到对应的历史。
+	 * Advisor 链上下文（{@code Map<String, Object>}）中会话 ID 的固定 key。 业务代码通过
+	 * {@code .advisors(a -> a.param(ChatMemory.CONVERSATION_ID, sessionId))} 注入；记忆
+	 * Advisor 再用此 key 取出会话 ID 并定位到对应的历史。
 	 */
 	String CONVERSATION_ID = "chat_memory_conversation_id";
 
@@ -74,8 +69,7 @@ public interface ChatMemory {
 	/**
 	 * Save the specified messages in the chat memory for the specified conversation.
 	 * <p>
-	 * 批量追加消息到指定会话。<b>具体策略由实现决定</b>——例如滑动窗口实现
-	 * 会在追加后裁剪掉最早的消息，使总数不超过窗口大小。
+	 * 批量追加消息到指定会话。<b>具体策略由实现决定</b>——例如滑动窗口实现 会在追加后裁剪掉最早的消息，使总数不超过窗口大小。
 	 */
 	void add(String conversationId, List<Message> messages);
 
