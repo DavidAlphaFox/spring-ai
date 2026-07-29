@@ -8,7 +8,10 @@
 **** xref:api/advisors-recursive.adoc[Recursive Advisors]
 
 ** xref:api/prompt.adoc[]
-** xref:api/structured-output-converter.adoc[Structured Output]
+** xref:api/structured-output.adoc[Structured Output]
+*** xref:api/structured-output/validation.adoc[Schema Validation & Self-Correction]
+*** xref:api/structured-output/native.adoc[Provider-Native Structured Output]
+*** xref:api/structured-output/converters.adoc[Output Converters]
 ** xref:api/multimodality.adoc[Multimodality]
 ** xref:api/index.adoc[Models]
 
@@ -26,6 +29,7 @@
 **** xref:api/chat/nvidia-chat.adoc[NVIDIA]
 **** xref:api/chat/ollama-chat.adoc[Ollama]
 **** xref:api/chat/perplexity-chat.adoc[Perplexity AI]
+**** xref:api/chat/oci-genai-chat.adoc[OCI Generative AI]
 **** xref:api/chat/openai-chat.adoc[OpenAI]
 
 *** xref:api/embeddings.adoc[Embedding Models]
@@ -35,6 +39,7 @@
 **** xref:api/embeddings/azure-openai-embeddings.adoc[Azure OpenAI]
 **** xref:api/embeddings/google-genai-embeddings-text.adoc[Google GenAI Text Embedding]
 **** xref:api/embeddings/mistralai-embeddings.adoc[Mistral AI]
+**** xref:api/embeddings/oci-genai-embeddings.adoc[OCI GenAI]
 **** xref:api/embeddings/ollama-embeddings.adoc[Ollama]
 **** xref:api/embeddings/onnx.adoc[(ONNX) Transformers]
 **** xref:api/embeddings/openai-embeddings.adoc[OpenAI]
@@ -47,6 +52,7 @@
 **** xref:api/image/azure-openai-image.adoc[Azure OpenAI]
 **** xref:api/image/openai-image.adoc[OpenAI]
 **** xref:api/image/stabilityai-image.adoc[Stability]
+**** xref:api/image/google-genai-image.adoc[Google GenAI]
 
 *** xref:api/audio.adoc[Audio Models]
 **** xref:api/audio/transcriptions.adoc[]
@@ -64,6 +70,9 @@
 ** xref:api/chat-memory.adoc[Chat Memory]
 
 ** xref:api/tools.adoc[Tool Calling]
+*** xref:api/tools/tool-calling-advisor.adoc[ToolCallingAdvisor]
+*** xref:api/tools/tool-search-tool.adoc[Tool Search Tool]
+*** xref:api/tools/chatmodel-tool-calling.adoc[ChatModel Tool Calling]
 
 ** xref:api/mcp/mcp-overview.adoc[Model Context Protocol (MCP)]
 *** xref:api/mcp/mcp-client-boot-starter-docs.adoc[MCP Client Boot Starters]
@@ -86,6 +95,7 @@
 
 ** xref:api/vectordbs.adoc[]
 *** xref:api/vectordbs/azure.adoc[]
+*** xref:api/vectordbs/azure-cosmos-db.adoc[]
 *** xref:api/vectordbs/bedrock-knowledge-base.adoc[]
 *** xref:api/vectordbs/apache-cassandra.adoc[]
 *** xref:api/vectordbs/chroma.adoc[]
@@ -120,9 +130,9 @@
 ** xref:guides/llm-as-judge.adoc[LLM-as-a-Judge Evaluation]
 ** xref:api/chat/prompt-engineering-patterns.adoc[]
 ** xref:api/effective-agents.adoc[Building Effective Agents]
-
-// * xref:contribution-guidelines.adoc[Contribution Guidelines]
+** https://catalog.workshops.aws/java-spring-ai-agents[Building agents with Spring AI by AWS]
+** https://catalog.workshops.aws/java-spring-ai-agentcore[Building agents with Spring AI and AgentCore by AWS]
+** https://github.com/microsoft/Spring-AI-for-Beginners[Spring AI for Beginners by Microsoft]
 
 * xref:upgrade-notes.adoc[]
-** xref:api/tools-migration.adoc[Migrating FunctionCallback to ToolCallback API]
 ** xref:api/chat/anthropic-migration.adoc[Migrating the Anthropic Module to the Official Java SDK]

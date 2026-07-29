@@ -22,6 +22,7 @@ import java.util.Arrays;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
@@ -238,6 +239,7 @@ import org.springframework.util.StringUtils;
  * @author Jihoon Kim
  * @author chabinhwang
  * @author Yanming Zhou
+ * @author Taewoong Kim
  * @see EmbeddingModel
  * @since 1.0.0
  */
@@ -474,11 +476,6 @@ public class RedisVectorStore extends AbstractObservationVectorStore implements 
 		String queryString = String.format(QUERY_FORMAT, filter, request.getTopK(), this.embeddingFieldName,
 				EMBEDDING_PARAM_NAME, DISTANCE_FIELD_NAME);
 
-		List<String> returnFields = new ArrayList<>();
-		this.metadataFields.stream().map(MetadataField::name).forEach(returnFields::add);
-		returnFields.add(this.embeddingFieldName);
-		returnFields.add(this.contentFieldName);
-		returnFields.add(DISTANCE_FIELD_NAME);
 		float[] embedding = this.embeddingModel.embed(request.getQuery());
 
 		// Normalize embeddings for COSINE distance metric
@@ -487,7 +484,7 @@ public class RedisVectorStore extends AbstractObservationVectorStore implements 
 		}
 
 		Query query = new Query(queryString).addParam(EMBEDDING_PARAM_NAME, RediSearchUtil.toByteArray(embedding))
-			.returnFields(returnFields.toArray(new String[0]))
+			.returnFields(getReturnFields().toArray(new String[0]))
 			.limit(0, request.getTopK())
 			.dialect(2);
 
@@ -756,7 +753,6 @@ public class RedisVectorStore extends AbstractObservationVectorStore implements 
 	private List<String> getReturnFields() {
 		List<String> returnFields = new ArrayList<>();
 		this.metadataFields.stream().map(MetadataField::name).forEach(returnFields::add);
-		returnFields.add(this.embeddingFieldName);
 		returnFields.add(this.contentFieldName);
 		returnFields.add(DISTANCE_FIELD_NAME);
 		return returnFields;
@@ -920,7 +916,8 @@ public class RedisVectorStore extends AbstractObservationVectorStore implements 
 				// Add individual terms with OR operator
 				for (String term : terms) {
 					// Skip stopwords if configured
-					if (this.stopwords.contains(term.toLowerCase())) {
+					// Use toLowerCase(Locale.getDefault()) to pass checkstyle
+					if (this.stopwords.contains(term.toLowerCase(Locale.getDefault()))) {
 						continue;
 					}
 					queryBuilder.append(" | ").append(term);
@@ -1126,12 +1123,6 @@ public class RedisVectorStore extends AbstractObservationVectorStore implements 
 			queryString = "(" + queryString + " " + filterExpression + ")";
 		}
 
-		List<String> returnFields = new ArrayList<>();
-		this.metadataFields.stream().map(MetadataField::name).forEach(returnFields::add);
-		returnFields.add(this.embeddingFieldName);
-		returnFields.add(this.contentFieldName);
-		returnFields.add(DISTANCE_FIELD_NAME);
-
 		// Log query information for debugging
 		if (logger.isDebugEnabled()) {
 			logger.debug("Range query string: " + queryString);
@@ -1140,7 +1131,7 @@ public class RedisVectorStore extends AbstractObservationVectorStore implements 
 
 		Query query1 = new Query(queryString).addParam("radius", effectiveRadius)
 			.addParam(EMBEDDING_PARAM_NAME, RediSearchUtil.toByteArray(embedding))
-			.returnFields(returnFields.toArray(new String[0]))
+			.returnFields(getReturnFields().toArray(new String[0]))
 			.dialect(2);
 
 		SearchResult result = this.jedisClient.ftSearch(this.indexName, query1);

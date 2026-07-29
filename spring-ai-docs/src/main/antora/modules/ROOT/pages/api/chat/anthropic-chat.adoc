@@ -55,7 +55,8 @@ Use the `spring.ai.anthropic.*` properties to configure the Anthropic connection
 
 | `spring.ai.anthropic.api-key` | Anthropic API key | -
 | `spring.ai.anthropic.base-url` | API base URL | `https://api.anthropic.com`
-| `spring.ai.anthropic.timeout` | Request timeout for the Anthropic client | `60s`
+| `spring.ai.anthropic.timeout` | Construction-time default timeout baked into the shared HTTP client at startup.
+Can be overridden per call via `AnthropicChatOptions.timeout()` set on a `ChatClient` or per-request prompt options. | `60s`
 | `spring.ai.anthropic.max-retries` | Maximum number of retries for failed requests | `2`
 | `spring.ai.anthropic.custom-headers.*` | Custom HTTP headers to add to all Anthropic client requests | -
 | `spring.ai.anthropic.chat.model` | Model name | `claude-haiku-4-5`
@@ -121,7 +122,9 @@ var chatOptions = AnthropicChatOptions.builder()
     .apiKey(System.getenv("ANTHROPIC_API_KEY"))
     .build();
 
-var chatModel = new AnthropicChatModel(chatOptions);
+var chatModel = AnthropicChatModel.builder()
+    .options(chatOptions)
+    .build();
 ----
 
 Or set the environment variable and let the SDK auto-detect it:
@@ -134,11 +137,12 @@ export ANTHROPIC_API_KEY=<your-api-key>
 [source,java]
 ----
 // API key will be detected from ANTHROPIC_API_KEY environment variable
-var chatModel = new AnthropicChatModel(
-    AnthropicChatOptions.builder()
+var chatModel = AnthropicChatModel.builder()
+    .options(AnthropicChatOptions.builder()
         .model("claude-sonnet-4-20250514")
         .maxTokens(1024)
-        .build());
+        .build())
+    .build();
 ----
 
 === Basic Usage
@@ -157,7 +161,7 @@ Flux<ChatResponse> stream = chatModel.stream(
 
 The https://github.com/spring-projects/spring-ai/blob/main/models/spring-ai-anthropic/src/main/java/org/springframework/ai/anthropic/AnthropicChatOptions.java[AnthropicChatOptions.java] class provides model configurations such as the model to use, temperature, max tokens, etc.
 
-On start-up, configure default options with the `AnthropicChatModel(options)` constructor.
+On start-up, configure default options with the `AnthropicChatModel.builder().defaultOptions(options).build()` constructor.
 
 At run-time, you can override the default options by adding new, request-specific options to the `Prompt` call.
 For example, to override the default model and temperature for a specific request:
@@ -188,7 +192,8 @@ ChatResponse response = chatModel.call(
 | stopSequences | Custom sequences that will cause the model to stop generating. | -
 | apiKey | The API key for authentication. Auto-detects from `ANTHROPIC_API_KEY` environment variable if not set. | -
 | baseUrl | The base URL for the Anthropic API. | https://api.anthropic.com
-| timeout | Request timeout duration. | 60 seconds
+| timeout | Per-call timeout override.
+When set via `ChatClient.Builder.defaultOptions()` or a per-request `ChatClient.prompt().options(...)`, it bounds only that call and overrides the `spring.ai.anthropic.timeout` construction-time default. | 60 seconds
 | maxRetries | Maximum number of retry attempts for failed requests. | 2
 | proxy | Proxy settings for the HTTP client. | -
 | customHeaders | Custom HTTP headers to include on all requests (client-level). | -
@@ -259,93 +264,9 @@ NOTE: To read the response headers, the streaming path consumes the Anthropic SD
 
 == Tool Calling
 
-You can register custom Java functions or methods with the `AnthropicChatModel` and have Claude intelligently choose to output a JSON object containing arguments to call one or many of the registered functions/tools.
-This is a powerful technique to connect the LLM capabilities with external tools and APIs.
-Read more about xref:api/tools.adoc[Tool Calling].
+`AnthropicChatModel` supports tool calling. Claude can request tool execution but does not run tools itself — Spring AI handles execution.
 
-`AnthropicChatModel` does not execute tool calls internally.
-Tool execution must be handled externally using one of two supported approaches:
-
-* **xref:api/tools.adoc#_chatclient_tool_execution[ChatClient with ToolCallAdvisor]** — the recommended approach for most use cases. `ToolCallAdvisor` is automatically registered and manages the tool-call loop transparently.
-* **xref:api/tools.adoc#_user_controlled_tool_execution[User-controlled tool execution]** — use `DefaultToolCallingManager` directly when you need full control over the loop (for example, when combining tool calling with prompt caching).
-
-=== Tool Calling via ChatClient (Recommended)
-
-Use `ChatClient` with `ToolCallAdvisor` for both synchronous and streaming tool execution.
-`ToolCallAdvisor` is auto-registered when tools are present, so no explicit advisor configuration is required.
-
-[source,java]
-----
-ToolCallback weatherCallback = FunctionToolCallback.builder("getCurrentWeather", new WeatherService())
-    .description("Get the weather in location")
-    .inputType(WeatherService.Request.class)
-    .build();
-
-// Synchronous
-String response = ChatClient.create(chatModel)
-    .prompt()
-    .user("What's the weather in Paris, Tokyo, and New York?")
-    .tools(weatherCallback)
-    .call()
-    .content();
-
-// Streaming
-Flux<String> stream = ChatClient.create(chatModel)
-    .prompt()
-    .user("What's the weather in Paris, Tokyo, and New York?")
-    .tools(weatherCallback)
-    .stream()
-    .content();
-----
-
-=== User-Controlled Tool Execution
-
-Use this pattern when you need direct access to the `ChatModel` API — for example, when combining tool calling with xref:api/chat/anthropic-chat.adoc#_prompt_caching[prompt caching].
-Set `internalToolExecutionEnabled(false)` on the options and drive the tool-call loop yourself using `DefaultToolCallingManager`.
-
-[source,java]
-----
-ToolCallingManager toolCallingManager = DefaultToolCallingManager.builder().build();
-
-AnthropicChatOptions options = AnthropicChatOptions.builder()
-    .internalToolExecutionEnabled(false)
-    .toolCallbacks(List.of(
-        FunctionToolCallback.builder("getCurrentWeather", new WeatherService())
-            .description("Get the weather in location")
-            .inputType(WeatherService.Request.class)
-            .build()))
-    .build();
-
-Prompt prompt = new Prompt("What's the weather in Paris, Tokyo, and New York?", options);
-ChatResponse response = chatModel.call(prompt);
-
-while (response.hasToolCalls()) {
-    ToolExecutionResult result = toolCallingManager.executeToolCalls(prompt, response);
-    prompt = new Prompt(result.conversationHistory(), options);
-    response = chatModel.call(prompt);
-}
-----
-
-For streaming, aggregate each streaming response with `MessageAggregator` to detect tool calls across chunks:
-
-[source,java]
-----
-AtomicReference<ChatResponse> aggregatedRef = new AtomicReference<>();
-new MessageAggregator()
-    .aggregate(chatModel.stream(prompt), aggregatedRef::set)
-    .collectList().block();
-
-while (aggregatedRef.get().hasToolCalls()) {
-    ToolExecutionResult result = toolCallingManager.executeToolCalls(prompt, aggregatedRef.get());
-    prompt = new Prompt(result.conversationHistory(), options);
-    aggregatedRef.set(null);
-    new MessageAggregator()
-        .aggregate(chatModel.stream(prompt), aggregatedRef::set)
-        .collectList().block();
-}
-
-String content = aggregatedRef.get().getResult().getOutput().getText();
-----
+For most applications, use `ChatClient` with the auto-registered `ToolCallingAdvisor` — see xref:api/tools.adoc[Tool Calling]. For low-level control where you drive the loop yourself (for example, when combining tool calling with xref:_prompt_caching[prompt caching]), see xref:api/tools/chatmodel-tool-calling.adoc[ChatModel Tool Calling].
 
 === Tool Choice Options
 
@@ -564,8 +485,10 @@ stream.subscribe(response -> {
     AssistantMessage message = generation.getOutput();
 
     if (message.getMetadata().containsKey("thinking")) {
-        // Incremental thinking content
-        System.out.print(message.getText());
+        // Thinking delta — getText() returns null; the full accumulated thinking text
+        // is available via AnthropicAssistantMessage.getThinkingContents() on the
+        // aggregated response after streaming completes.
+        System.out.println("[thinking...]");
     }
     else if (message.getMetadata().containsKey("signature")) {
         // Thinking block signature (emitted at end of thinking)
@@ -589,9 +512,20 @@ When thinking is enabled, the response contains different types of content:
 | **Thinking Block** | `signature` | Claude's reasoning text with a cryptographic signature. In sync mode, the thinking text is in `getText()` and the signature is in `getMetadata().get("signature")`.
 | **Redacted Thinking** | `data` | Safety-redacted reasoning. Contains only a `data` marker, no visible text.
 | **Signature (streaming)** | `signature` | In streaming mode, the signature arrives as a separate delta at the end of a thinking block.
-| **Thinking Delta (streaming)** | `thinking` | Incremental thinking text chunks during streaming. The `thinking` metadata key is set to `true`.
+| **Thinking Delta (streaming)** | `thinking` | Incremental thinking chunks during streaming. The `thinking` metadata key is set to `true`. `getText()` returns null on these chunks; the full thinking text is available via `AnthropicAssistantMessage.getThinkingContents()` on the aggregated response.
 | **Text Block** | _(none)_ | The final answer text in `getText()`.
 |====
+
+=== Thinking with Tool Calls
+
+When thinking is enabled and Claude decides to call a tool, the thinking blocks from
+that response are automatically preserved and replayed in the follow-up request
+alongside the tool results.
+This is required by the Anthropic API — omitting the thinking blocks from the replay causes an API error.
+
+No special configuration is needed.
+Spring AI handles the replay transparently whether you use the auto-managed tool loop
+(`ChatClient` with `ToolCallingAdvisor`) or drive the loop manually via `ToolCallingManager`.
 
 == Multi-Modal Support
 
@@ -1301,7 +1235,9 @@ public class ChatController {
             .maxTokens(1024)
             .apiKey(System.getenv("ANTHROPIC_API_KEY"))
             .build();
-        this.chatModel = new AnthropicChatModel(options);
+        this.chatModel = AnthropicChatModel.builder()
+            .options(options)
+            .build();
     }
 
     @GetMapping("/ai/generate")
@@ -1795,6 +1731,8 @@ The following features are not yet supported:
 * Google Vertex AI backend
 
 These features are planned for future releases.
+
+include::partial$anthropic/anthropic-http-client-customization.adoc[]
 
 == Additional Resources
 

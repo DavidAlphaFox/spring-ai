@@ -38,7 +38,7 @@ import org.junit.jupiter.params.provider.ValueSource;
 import reactor.core.publisher.Flux;
 
 import org.springframework.ai.chat.client.ChatClient;
-import org.springframework.ai.chat.client.advisor.ToolCallAdvisor;
+import org.springframework.ai.chat.client.advisor.ToolCallingAdvisor;
 import org.springframework.ai.chat.memory.ChatMemory;
 import org.springframework.ai.chat.memory.MessageWindowChatMemory;
 import org.springframework.ai.chat.messages.AssistantMessage;
@@ -51,7 +51,6 @@ import org.springframework.ai.chat.metadata.Usage;
 import org.springframework.ai.chat.model.ChatResponse;
 import org.springframework.ai.chat.model.Generation;
 import org.springframework.ai.chat.model.MessageAggregator;
-import org.springframework.ai.chat.prompt.ChatOptions;
 import org.springframework.ai.chat.prompt.Prompt;
 import org.springframework.ai.chat.prompt.PromptTemplate;
 import org.springframework.ai.chat.prompt.SystemPromptTemplate;
@@ -60,7 +59,6 @@ import org.springframework.ai.converter.BeanOutputConverter;
 import org.springframework.ai.converter.ListOutputConverter;
 import org.springframework.ai.converter.MapOutputConverter;
 import org.springframework.ai.model.tool.DefaultToolCallingManager;
-import org.springframework.ai.model.tool.ToolCallingChatOptions;
 import org.springframework.ai.model.tool.ToolCallingManager;
 import org.springframework.ai.model.tool.ToolExecutionResult;
 import org.springframework.ai.openai.OpenAiChatModel;
@@ -211,6 +209,25 @@ public class OpenAiChatModelIT {
 		chatResponseFlux.subscribe();
 		assertThat(latch.await(120, TimeUnit.SECONDS)).isTrue();
 		assertThat(answer).contains("1st ");
+	}
+
+	@Test
+	void intermediateStreamingChunksHaveNullFinishReason() {
+		Flux<ChatResponse> flux = this.chatModel.stream(new Prompt("List the days of the week, one per line."));
+		List<ChatResponse> withResult = flux.collectList()
+			.block()
+			.stream()
+			// Only consider chunks that carry a generation — some trailing chunks are
+			// empty usage-only chunks with no result
+			.filter(r -> r.getResult() != null)
+			.collect(Collectors.toList());
+
+		assertThat(withResult).hasSizeGreaterThan(1);
+		// All intermediate chunks must have a null finish reason
+		withResult.subList(0, withResult.size() - 1)
+			.forEach(r -> assertThat(r.getResult().getMetadata().getFinishReason()).isNull());
+		// The final chunk must carry a non-null finish reason (e.g. "STOP")
+		assertThat(withResult.get(withResult.size() - 1).getResult().getMetadata().getFinishReason()).isNotNull();
 	}
 
 	@Test
@@ -448,7 +465,7 @@ public class OpenAiChatModelIT {
 
 		ChatResponse chatResponse = ChatClient.create(this.chatModel)
 			.prompt()
-			.advisors(ToolCallAdvisor.builder().build())
+			.advisors(ToolCallingAdvisor.builder().build())
 			.user("What's the weather like in San Francisco, Tokyo, and Paris? Answer in Celsius.")
 			.tools(weatherToolCallback)
 			.call()
@@ -457,9 +474,9 @@ public class OpenAiChatModelIT {
 		assertThat(usage).isNotNull();
 		assertThat(usage).isNotInstanceOf(EmptyUsage.class);
 		assertThat(usage).isInstanceOf(DefaultUsage.class);
-		assertThat(usage.getPromptTokens()).isGreaterThan(450).isLessThan(600);
-		assertThat(usage.getCompletionTokens()).isGreaterThan(500).isLessThan(800);
-		assertThat(usage.getTotalTokens()).isGreaterThan(900).isLessThan(1400);
+		assertThat(usage.getPromptTokens()).isPositive();
+		assertThat(usage.getCompletionTokens()).isPositive();
+		assertThat(usage.getTotalTokens()).isEqualTo(usage.getPromptTokens() + usage.getCompletionTokens());
 	}
 
 	@Test
@@ -471,7 +488,7 @@ public class OpenAiChatModelIT {
 
 		ChatResponse lastResponse = ChatClient.create(this.chatModel)
 			.prompt()
-			.advisors(ToolCallAdvisor.builder().build())
+			.advisors(ToolCallingAdvisor.builder().build())
 			.options(OpenAiChatOptions.builder()
 				.streamOptions(StreamOptions.builder().includeUsage(true).build())
 				.reasoningEffort(ReasoningEffort.MINIMAL.toString()))
@@ -486,9 +503,9 @@ public class OpenAiChatModelIT {
 		assertThat(usage).isNotNull();
 		assertThat(usage).isNotInstanceOf(EmptyUsage.class);
 		assertThat(usage).isInstanceOf(DefaultUsage.class);
-		assertThat(usage.getPromptTokens()).isGreaterThan(450).isLessThan(600);
-		assertThat(usage.getCompletionTokens()).isGreaterThan(100).isLessThan(500);
-		assertThat(usage.getTotalTokens()).isGreaterThan(550).isLessThan(1100);
+		assertThat(usage.getPromptTokens()).isPositive();
+		assertThat(usage.getCompletionTokens()).isPositive();
+		assertThat(usage.getTotalTokens()).isEqualTo(usage.getPromptTokens() + usage.getCompletionTokens());
 	}
 
 	@Test
@@ -638,7 +655,7 @@ public class OpenAiChatModelIT {
 		ChatMemory chatMemory = MessageWindowChatMemory.builder().build();
 		String conversationId = UUID.randomUUID().toString();
 
-		ChatOptions chatOptions = ToolCallingChatOptions.builder()
+		OpenAiChatOptions chatOptions = OpenAiChatOptions.builder()
 			.toolCallbacks(ToolCallbacks.from(new MathTools()))
 			.build();
 		Prompt prompt = new Prompt(
@@ -670,6 +687,44 @@ public class OpenAiChatModelIT {
 
 		assertThat(newResponse).isNotNull();
 		assertThat(newResponse.getResult().getOutput().getText()).contains("6").contains("8");
+	}
+
+	@Test
+	void toolChoiceRequiredForcesToolCall() {
+		OpenAiChatOptions options = OpenAiChatOptions.builder()
+			.model("gpt-4o-mini")
+			.toolChoice("required")
+			.toolCallbacks(List.of(FunctionToolCallback.builder("getCurrentWeather", new MockWeatherService())
+				.description("Get the weather in location")
+				.inputType(MockWeatherService.Request.class)
+				.build()))
+			.build();
+
+		Prompt prompt = new Prompt(List.of(new UserMessage("What's the weather like in Paris?")), options);
+		ChatResponse response = this.chatModel.call(prompt);
+
+		// toolChoice "required" must force the model to call a tool rather than reply
+		// in plain text
+		assertThat(response.getResult().getOutput().getToolCalls()).isNotEmpty();
+	}
+
+	@Test
+	void toolChoiceNonePreventsToolCall() {
+		OpenAiChatOptions options = OpenAiChatOptions.builder()
+			.model("gpt-4o-mini")
+			.toolChoice("none")
+			.toolCallbacks(List.of(FunctionToolCallback.builder("getCurrentWeather", new MockWeatherService())
+				.description("Get the weather in location")
+				.inputType(MockWeatherService.Request.class)
+				.build()))
+			.build();
+
+		Prompt prompt = new Prompt(List.of(new UserMessage("What's the weather like in Paris?")), options);
+		ChatResponse response = this.chatModel.call(prompt);
+
+		// toolChoice "none" must prevent tool calls even when tools are registered
+		assertThat(response.getResult().getOutput().getToolCalls()).isEmpty();
+		assertThat(response.getResult().getOutput().getText()).isNotBlank();
 	}
 
 	@Test

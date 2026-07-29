@@ -21,6 +21,7 @@ import java.util.ArrayList;
 import java.util.Collection;
 import java.util.HashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicReference;
 
@@ -32,6 +33,8 @@ import com.google.genai.types.Candidate;
 import com.google.genai.types.Content;
 import com.google.genai.types.FinishReason;
 import com.google.genai.types.FunctionCall;
+import com.google.genai.types.FunctionCallingConfig;
+import com.google.genai.types.FunctionCallingConfigMode;
 import com.google.genai.types.FunctionDeclaration;
 import com.google.genai.types.FunctionResponse;
 import com.google.genai.types.GenerateContentConfig;
@@ -44,6 +47,7 @@ import com.google.genai.types.Schema;
 import com.google.genai.types.ThinkingConfig;
 import com.google.genai.types.ThinkingLevel;
 import com.google.genai.types.Tool;
+import com.google.genai.types.ToolConfig;
 import io.micrometer.observation.Observation;
 import io.micrometer.observation.ObservationRegistry;
 import io.micrometer.observation.contextpropagation.ObservationThreadLocalAccessor;
@@ -751,10 +755,31 @@ public class GoogleGenAiChatModel implements ChatModel, DisposableBean {
 			configBuilder.tools(tools);
 		}
 
-		// Build ToolConfig if includeServerSideToolInvocations is enabled
-		if (Boolean.TRUE.equals(requestOptions.getIncludeServerSideToolInvocations())) {
-			configBuilder
-				.toolConfig(com.google.genai.types.ToolConfig.builder().includeServerSideToolInvocations(true));
+		if (requestOptions.getToolChoice() != null
+				|| Boolean.TRUE.equals(requestOptions.getIncludeServerSideToolInvocations())) {
+
+			ToolConfig.Builder toolConfigBuilder = ToolConfig.builder();
+
+			// Build ToolConfig if includeServerSideToolInvocations is enabled
+			if (Boolean.TRUE.equals(requestOptions.getIncludeServerSideToolInvocations())) {
+				toolConfigBuilder.includeServerSideToolInvocations(true);
+			}
+
+			if (requestOptions.getToolChoice() != null) {
+				GoogleGenAiChatOptions.ToolChoice toolChoice = requestOptions.getToolChoice();
+				var fccBuilder = FunctionCallingConfig.builder()
+					.mode(mapToFunctionCallingConfigMode(toolChoice.mode()));
+
+				if ((toolChoice.mode() == GoogleGenAiChatOptions.ToolChoice.Mode.ANY
+						|| toolChoice.mode() == GoogleGenAiChatOptions.ToolChoice.Mode.VALIDATED)
+						&& !CollectionUtils.isEmpty(toolChoice.allowedFunctionNames())) {
+					fccBuilder.allowedFunctionNames(toolChoice.allowedFunctionNames());
+				}
+
+				toolConfigBuilder.functionCallingConfig(fccBuilder.build());
+			}
+
+			configBuilder.toolConfig(toolConfigBuilder.build());
 		}
 
 		// Handle cached content
@@ -831,6 +856,16 @@ public class GoogleGenAiChatModel implements ChatModel, DisposableBean {
 		};
 	}
 
+	private static FunctionCallingConfigMode mapToFunctionCallingConfigMode(
+			GoogleGenAiChatOptions.ToolChoice.Mode mode) {
+		return switch (mode) {
+			case AUTO -> new FunctionCallingConfigMode(FunctionCallingConfigMode.Known.AUTO);
+			case ANY -> new FunctionCallingConfigMode(FunctionCallingConfigMode.Known.ANY);
+			case VALIDATED -> new FunctionCallingConfigMode(FunctionCallingConfigMode.Known.VALIDATED);
+			case NONE -> new FunctionCallingConfigMode(FunctionCallingConfigMode.Known.NONE);
+		};
+	}
+
 	/**
 	 * Checks if the model name indicates a Gemini 3 Pro model.
 	 * @param modelName the model name to check
@@ -840,7 +875,7 @@ public class GoogleGenAiChatModel implements ChatModel, DisposableBean {
 		if (modelName == null) {
 			return false;
 		}
-		String lower = modelName.toLowerCase();
+		String lower = modelName.toLowerCase(Locale.ROOT);
 		return lower.contains("gemini-3") && lower.contains("pro") && !lower.contains("flash");
 	}
 
@@ -853,13 +888,13 @@ public class GoogleGenAiChatModel implements ChatModel, DisposableBean {
 		if (modelName == null) {
 			return false;
 		}
-		String lower = modelName.toLowerCase();
+		String lower = modelName.toLowerCase(Locale.ROOT);
 		return lower.contains("gemini-3") && lower.contains("flash");
 	}
 
 	/**
-	 * Validates ThinkingLevel compatibility with the model. Gemini 3 Pro only supports
-	 * LOW and HIGH. Gemini 3 Flash supports all levels.
+	 * Validates ThinkingLevel compatibility with the model. Gemini 3.1 Pro doesn't
+	 * support MINIMAL. Gemini 3 Flash supports all levels.
 	 * @param level the thinking level to validate
 	 * @param modelName the model name
 	 * @throws IllegalArgumentException if the level is not supported for the model
@@ -869,10 +904,10 @@ public class GoogleGenAiChatModel implements ChatModel, DisposableBean {
 			return;
 		}
 		if (isGemini3ProModel(modelName)) {
-			if (level == GoogleGenAiThinkingLevel.MINIMAL || level == GoogleGenAiThinkingLevel.MEDIUM) {
+			if (level == GoogleGenAiThinkingLevel.MINIMAL) {
 				throw new IllegalArgumentException(
 						String.format("ThinkingLevel.%s is not supported for Gemini 3 Pro models. "
-								+ "Supported levels: LOW, HIGH. Model: %s", level, modelName));
+								+ "Supported levels: LOW, MEDIUM, HIGH. Model: %s", level, modelName));
 			}
 		}
 	}
@@ -946,6 +981,21 @@ public class GoogleGenAiChatModel implements ChatModel, DisposableBean {
 
 	public static Builder builder() {
 		return new Builder();
+	}
+
+	/**
+	 * Look at the options of the provided prompt. If none are provided, return a new
+	 * prompt using this model
+	 * {@link org.springframework.ai.chat.model.ChatModel#getOptions() options}.
+	 * Otherwise, use the prompt as is.
+	 */
+	private Prompt buildRequestPrompt(Prompt prompt) {
+		if (prompt.getOptions() == null) {
+			return prompt.mutate().chatOptions(this.getOptions()).build();
+		}
+		else {
+			return prompt;
+		}
 	}
 
 	public static final class Builder {
@@ -1037,6 +1087,7 @@ public class GoogleGenAiChatModel implements ChatModel, DisposableBean {
 		 * See: <a href=
 		 * "https://cloud.google.com/vertex-ai/generative-ai/docs/models/gemini/2-0-flash">gemini-2.0-flash</a>
 		 */
+		@Deprecated
 		GEMINI_2_0_FLASH("gemini-2.0-flash-001"),
 
 		/**
@@ -1054,6 +1105,7 @@ public class GoogleGenAiChatModel implements ChatModel, DisposableBean {
 		 * See: <a href=
 		 * "https://cloud.google.com/vertex-ai/generative-ai/docs/models/gemini/2-0-flash-lite">gemini-2.0-flash-lite</a>
 		 */
+		@Deprecated
 		GEMINI_2_0_FLASH_LIGHT("gemini-2.0-flash-lite-001"),
 
 		/**
@@ -1105,11 +1157,17 @@ public class GoogleGenAiChatModel implements ChatModel, DisposableBean {
 		 */
 		GEMINI_2_5_FLASH_LIGHT("gemini-2.5-flash-lite"),
 
+		/**
+		 * @deprecated Use {@link #GEMINI_3_1_PRO_PREVIEW} instead
+		 */
+		@Deprecated
 		GEMINI_3_PRO_PREVIEW("gemini-3.1-pro-preview"),
 
-		GEMINI_3_5_FLASH("gemini-3.5-flash"),
+		GEMINI_3_1_PRO_PREVIEW("gemini-3.1-pro-preview"),
 
-		GEMINI_3_1_FLASH_LITE("gemini-3.1-flash-lite");
+		GEMINI_3_1_FLASH_LITE("gemini-3.1-flash-lite"),
+
+		GEMINI_3_5_FLASH("gemini-3.5-flash");
 
 		public final String value;
 

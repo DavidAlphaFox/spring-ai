@@ -244,9 +244,12 @@ public class OllamaChatModel implements ChatModel {
 									toolCall.function().name(), jsonHelper.toJson(toolCall.function().arguments())))
 							.toList();
 
+				String thinking = ollamaResponse.message().thinking();
+				Map<String, Object> messageProperties = thinking != null ? Map.of(THINKING_METADATA_KEY, thinking)
+						: Map.of();
 				var assistantMessage = AssistantMessage.builder()
 					.content(ollamaResponse.message().content())
-					.properties(Map.of())
+					.properties(messageProperties)
 					.toolCalls(toolCalls)
 					.build();
 
@@ -254,7 +257,6 @@ public class OllamaChatModel implements ChatModel {
 				if (ollamaResponse.promptEvalCount() != null && ollamaResponse.evalCount() != null) {
 					ChatGenerationMetadata.Builder builder = ChatGenerationMetadata.builder()
 						.finishReason(ollamaResponse.doneReason());
-					String thinking = ollamaResponse.message().thinking();
 					if (thinking != null) {
 						builder.metadata(THINKING_METADATA_KEY, thinking);
 					}
@@ -320,16 +322,17 @@ public class OllamaChatModel implements ChatModel {
 						.toList();
 				}
 
+				String thinking = chunk.message().thinking();
+				Map<String, Object> messageProperties = thinking != null ? Map.of(THINKING_METADATA_KEY, thinking)
+						: Map.of();
 				var assistantMessage = AssistantMessage.builder()
 					.content(content)
-					.properties(Map.of())
+					.properties(messageProperties)
 					.toolCalls(toolCalls)
 					.build();
 
 				ChatGenerationMetadata generationMetadata = ChatGenerationMetadata.NULL;
 				boolean hasEvalCount = chunk.promptEvalCount() != null && chunk.evalCount() != null;
-				String thinking = chunk.message().thinking();
-
 				if (hasEvalCount || thinking != null) {
 					ChatGenerationMetadata.Builder builder = ChatGenerationMetadata.builder();
 					if (hasEvalCount) {
@@ -483,11 +486,25 @@ public class OllamaChatModel implements ChatModel {
 		this.observationConvention = observationConvention;
 	}
 
+	/**
+	 * Look at the options of the provided prompt. If none are provided, return a new
+	 * prompt using this model {@link ChatModel#getOptions() options}. Otherwise, use the
+	 * prompt as is.
+	 */
+	private Prompt buildRequestPrompt(Prompt prompt) {
+		if (prompt.getOptions() == null) {
+			return prompt.mutate().chatOptions(this.getOptions()).build();
+		}
+		else {
+			return prompt;
+		}
+	}
+
 	public static final class Builder {
 
 		private @Nullable OllamaApi ollamaApi;
 
-		private OllamaChatOptions options = OllamaChatOptions.builder().build();
+		private @Nullable OllamaChatOptions options;
 
 		private @Nullable ToolCallingManager toolCallingManager;
 
@@ -515,7 +532,7 @@ public class OllamaChatModel implements ChatModel {
 		 * @param toolCallingManager the tool calling manager
 		 * @return this builder
 		 * @deprecated since 2.0.0 for removal in 3.0.0 — internal tool execution in
-		 * {@link OllamaChatModel} is superseded by {@code ToolCallAdvisor} used via
+		 * {@link OllamaChatModel} is superseded by {@code ToolCallingAdvisor} used via
 		 * {@code ChatClient}.
 		 */
 		@Deprecated(since = "2.0.0", forRemoval = true)
@@ -541,7 +558,9 @@ public class OllamaChatModel implements ChatModel {
 
 		public OllamaChatModel build() {
 			Assert.state(this.ollamaApi != null, "OllamaApi must not be null");
-			return new OllamaChatModel(this.ollamaApi, this.options,
+			OllamaChatOptions resolvedOptions = this.options != null ? this.options
+					: OllamaChatOptions.builder().build();
+			return new OllamaChatModel(this.ollamaApi, resolvedOptions,
 					Objects.requireNonNullElse(this.toolCallingManager, DEFAULT_TOOL_CALLING_MANAGER),
 					this.observationRegistry, this.modelManagementOptions, this.retryTemplate);
 		}

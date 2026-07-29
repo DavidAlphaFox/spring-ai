@@ -63,6 +63,7 @@ import org.springframework.util.CollectionUtils;
  * @author Soby Chacko
  * @author Austin Dase
  * @author Sebastien Deleuze
+ * @author Seeun Kim
  * @since 1.0.0
  * @see AnthropicChatModel
  * @see <a href="https://docs.anthropic.com/en/api/messages">Anthropic Messages API</a>
@@ -96,10 +97,14 @@ public class AnthropicChatOptions implements ToolCallingChatOptions, StructuredO
 	/**
 	 * The model name to use for requests.
 	 */
-	private final @Nullable String model;
+	private final String model;
 
 	/**
-	 * Request timeout for the Anthropic client. Defaults to 60 seconds if not specified.
+	 * Request timeout for the Anthropic client, applied per call — set as a
+	 * {@code ChatClient} default option or a per-request override, this bounds only that
+	 * call, not every call made by the underlying {@link AnthropicChatModel}. Defaults to
+	 * 60 seconds if not specified anywhere (including at {@link AnthropicChatModel}
+	 * construction time).
 	 */
 	private final @Nullable Duration timeout;
 
@@ -121,7 +126,7 @@ public class AnthropicChatOptions implements ToolCallingChatOptions, StructuredO
 	/**
 	 * Maximum number of tokens to generate in the response.
 	 */
-	private final @Nullable Integer maxTokens;
+	private final Integer maxTokens;
 
 	/**
 	 * Request metadata containing user ID for abuse detection.
@@ -278,7 +283,7 @@ public class AnthropicChatOptions implements ToolCallingChatOptions, StructuredO
 	}
 
 	@Override
-	public @Nullable String getModel() {
+	public String getModel() {
 		return this.model;
 	}
 
@@ -299,7 +304,7 @@ public class AnthropicChatOptions implements ToolCallingChatOptions, StructuredO
 	}
 
 	@Override
-	public @Nullable Integer getMaxTokens() {
+	public Integer getMaxTokens() {
 		return this.maxTokens;
 	}
 
@@ -562,15 +567,9 @@ public class AnthropicChatOptions implements ToolCallingChatOptions, StructuredO
 		@Override
 		public B clone() {
 			AbstractBuilder<B> copy = super.clone();
-			if (this.customHeaders != null && !this.customHeaders.isEmpty()) {
-				copy.customHeaders = this.customHeaders;
-			}
-			if (this.citationDocuments != null && !this.citationDocuments.isEmpty()) {
-				copy.citationDocuments = this.citationDocuments;
-			}
-			if (this.httpHeaders != null && !this.httpHeaders.isEmpty()) {
-				copy.httpHeaders = this.httpHeaders;
-			}
+			copy.customHeaders = this.customHeaders == null ? null : new HashMap<>(this.customHeaders);
+			copy.citationDocuments = this.citationDocuments == null ? null : new ArrayList<>(this.citationDocuments);
+			copy.httpHeaders = this.httpHeaders == null ? null : new HashMap<>(this.httpHeaders);
 			return (B) copy;
 		}
 

@@ -16,6 +16,8 @@
 
 package org.springframework.ai.model.openai.autoconfigure;
 
+import java.util.List;
+
 import org.junit.jupiter.api.Test;
 import org.skyscreamer.jsonassert.JSONAssert;
 import org.skyscreamer.jsonassert.JSONCompareMode;
@@ -32,6 +34,7 @@ import static org.assertj.core.api.Assertions.assertThat;
  *
  * @author Christian Tzolov
  * @author Sebastien Deleuze
+ * @author guan xu
  */
 public class OpenAiChatPropertiesTests {
 
@@ -84,7 +87,8 @@ public class OpenAiChatPropertiesTests {
 				"spring.ai.openai.chat.tool-choice={\"type\":\"function\",\"function\":{\"name\":\"toolChoiceFunctionName\"}}",
 				"spring.ai.openai.chat.stream-options.include-usage=true",
 				"spring.ai.openai.chat.stream-options.include-obfuscation=true",
-				"spring.ai.openai.chat.stream-options.additional-properties.foo=bar"
+				"spring.ai.openai.chat.stream-options.additional-properties.foo=bar",
+				"spring.ai.openai.chat.prompt-cache-key=test-cache-key"
 
 			)
 			// @formatter:on
@@ -117,6 +121,54 @@ public class OpenAiChatPropertiesTests {
 				assertThat(options.getStreamOptions()).isNotNull();
 				assertThat(options.getStreamOptions().includeObfuscation()).isTrue();
 				assertThat(options.getStreamOptions().additionalProperties().get("foo")).isEqualTo("bar");
+
+				assertThat(options.getPromptCacheKey()).isEqualTo("test-cache-key");
+			});
+	}
+
+	@Test
+	public void chatToolChoiceStringValuesTest() {
+
+		for (String toolChoice : List.of("none", "auto", "required")) {
+			this.contextRunner.withPropertyValues("spring.ai.openai.api-key=API_KEY",
+					"spring.ai.openai.base-url=http://TEST.BASE.URL", "spring.ai.openai.chat.tool-choice=" + toolChoice)
+				.withConfiguration(
+						AutoConfigurations.of(OpenAiChatAutoConfiguration.class, ToolCallingAutoConfiguration.class))
+				.run(context -> {
+					var chatProperties = context.getBean(OpenAiChatProperties.class);
+					assertThat(chatProperties.toOptions().getToolChoice()).isEqualTo(toolChoice);
+				});
+		}
+	}
+
+	@Test
+	public void chatExtraBodyTest() {
+
+		this.contextRunner
+			.withPropertyValues(// @formatter:off
+				"spring.ai.openai.api-key=API_KEY",
+				"spring.ai.openai.base-url=http://TEST.BASE.URL",
+
+				"spring.ai.openai.chat.extra-body.key1=value1",
+				"spring.ai.openai.chat.extra-body.key2=123",
+				"spring.ai.openai.chat.extra-body.nested.key3=true"
+			)
+			// @formatter:on
+			.withConfiguration(
+					AutoConfigurations.of(OpenAiChatAutoConfiguration.class, ToolCallingAutoConfiguration.class))
+			.run(context -> {
+				var chatProperties = context.getBean(OpenAiChatProperties.class);
+
+				assertThat(chatProperties.getExtraBody()).isNotNull();
+				assertThat(chatProperties.getExtraBody()).containsEntry("key1", "value1");
+				assertThat(chatProperties.getExtraBody()).containsEntry("key2", "123");
+				assertThat(chatProperties.getExtraBody()).containsKey("nested");
+
+				var options = chatProperties.toOptions();
+				assertThat(options.getExtraBody()).isNotNull();
+				assertThat(options.getExtraBody()).containsEntry("key1", "value1");
+				assertThat(options.getExtraBody()).containsEntry("key2", "123");
+				assertThat(options.getExtraBody()).containsKey("nested");
 			});
 	}
 

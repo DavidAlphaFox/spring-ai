@@ -32,8 +32,6 @@ import java.util.function.Consumer;
 import io.micrometer.observation.Observation;
 import io.micrometer.observation.ObservationRegistry;
 import io.micrometer.observation.contextpropagation.ObservationThreadLocalAccessor;
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
 import org.jspecify.annotations.Nullable;
 import reactor.core.publisher.Flux;
 
@@ -41,10 +39,9 @@ import org.springframework.ai.chat.client.advisor.ChatModelCallAdvisor;
 import org.springframework.ai.chat.client.advisor.ChatModelStreamAdvisor;
 import org.springframework.ai.chat.client.advisor.DefaultAroundAdvisorChain;
 import org.springframework.ai.chat.client.advisor.StructuredOutputValidationAdvisor;
-import org.springframework.ai.chat.client.advisor.ToolCallAdvisor;
+import org.springframework.ai.chat.client.advisor.ToolCallingAdvisor;
 import org.springframework.ai.chat.client.advisor.api.Advisor;
 import org.springframework.ai.chat.client.advisor.api.BaseAdvisorChain;
-import org.springframework.ai.chat.client.advisor.api.BaseChatMemoryAdvisor;
 import org.springframework.ai.chat.client.advisor.api.MemoryAdvisor;
 import org.springframework.ai.chat.client.advisor.api.ToolAdvisor;
 import org.springframework.ai.chat.client.advisor.observation.AdvisorObservationConvention;
@@ -62,7 +59,6 @@ import org.springframework.ai.chat.prompt.Prompt;
 import org.springframework.ai.content.Media;
 import org.springframework.ai.converter.BeanOutputConverter;
 import org.springframework.ai.converter.StructuredOutputConverter;
-import org.springframework.ai.model.tool.ToolCallingChatOptions;
 import org.springframework.ai.support.ToolCallbacks;
 import org.springframework.ai.template.TemplateRenderer;
 import org.springframework.ai.template.st.StTemplateRenderer;
@@ -92,8 +88,6 @@ import org.springframework.util.StringUtils;
  * @since 1.0.0
  */
 public class DefaultChatClient implements ChatClient {
-
-	private static final Log logger = LogFactory.getLog(DefaultChatClient.class);
 
 	private static final ChatClientObservationConvention DEFAULT_CHAT_CLIENT_OBSERVATION_CONVENTION = new DefaultChatClientObservationConvention();
 
@@ -804,7 +798,7 @@ public class DefaultChatClient implements ChatClient {
 
 		private ChatOptions.@Nullable Builder<?> optionsCustomizer;
 
-		private final ToolCallAdvisor.Builder<?> toolCallAdvisorBuilder;
+		private final ToolCallingAdvisor.Builder<?> toolCallingAdvisorBuilder;
 
 		/* copy constructor */
 		DefaultChatClientRequestSpec(DefaultChatClientRequestSpec ccr) {
@@ -812,7 +806,7 @@ public class DefaultChatClient implements ChatClient {
 					ccr.systemMetadata, ccr.toolCallbacks, ccr.toolCallbackProviders, ccr.messages, ccr.media,
 					ccr.optionsCustomizer, ccr.advisors, ccr.advisorParams, ccr.observationRegistry,
 					ccr.chatClientObservationConvention, ccr.toolContext, ccr.templateRenderer,
-					ccr.advisorObservationConvention, ccr.toolCallAdvisorBuilder);
+					ccr.advisorObservationConvention, ccr.toolCallingAdvisorBuilder);
 		}
 
 		public DefaultChatClientRequestSpec(ChatModel chatModel, @Nullable String userText,
@@ -824,7 +818,7 @@ public class DefaultChatClient implements ChatClient {
 				@Nullable ChatClientObservationConvention chatClientObservationConvention,
 				Map<String, Object> toolContext, @Nullable TemplateRenderer templateRenderer,
 				@Nullable AdvisorObservationConvention advisorObservationConvention,
-				ToolCallAdvisor.Builder<?> toolCallAdvisorBuilder) {
+				ToolCallingAdvisor.Builder<?> toolCallingAdvisorBuilder) {
 
 			Assert.notNull(chatModel, "chatModel cannot be null");
 			Assert.notNull(userParams, "userParams cannot be null");
@@ -839,10 +833,10 @@ public class DefaultChatClient implements ChatClient {
 			Assert.notNull(advisorParams, "advisorParams cannot be null");
 			Assert.notNull(observationRegistry, "observationRegistry cannot be null");
 			Assert.notNull(toolContext, "toolContext cannot be null");
-			Assert.notNull(toolCallAdvisorBuilder, "toolCallAdvisorBuilder cannot be null");
+			Assert.notNull(toolCallingAdvisorBuilder, "toolCallingAdvisorBuilder cannot be null");
 
 			this.chatModel = chatModel;
-			this.toolCallAdvisorBuilder = toolCallAdvisorBuilder;
+			this.toolCallingAdvisorBuilder = toolCallingAdvisorBuilder;
 			this.optionsCustomizer = customizer != null ? customizer.clone() : null;
 
 			this.userText = userText;
@@ -939,7 +933,7 @@ public class DefaultChatClient implements ChatClient {
 		public Builder mutate() {
 			DefaultChatClientBuilder builder = (DefaultChatClientBuilder) ChatClient
 				.builder(this.chatModel, this.observationRegistry, this.chatClientObservationConvention,
-						this.advisorObservationConvention, this.toolCallAdvisorBuilder)
+						this.advisorObservationConvention, this.toolCallingAdvisorBuilder)
 				.defaultTemplateRenderer(this.templateRenderer)
 				.defaultTools(this.toolCallbacks.toArray(new ToolCallback[0]))
 				.defaultTools((Object[]) this.toolCallbackProviders.toArray(new ToolCallbackProvider[0]))
@@ -1193,9 +1187,8 @@ public class DefaultChatClient implements ChatClient {
 		}
 
 		private BaseAdvisorChain buildAdvisorChain() {
-			autoRegisterToolCallAdvisor();
+			autoRegisterToolCallingAdvisor();
 			validateSingleToolAdvisor();
-			warnOnMemoryAdvisorOrderMismatch();
 
 			// At the stack bottom add the model call advisors.
 			// They play the role of the last advisors in the advisor chain.
@@ -1210,53 +1203,38 @@ public class DefaultChatClient implements ChatClient {
 		}
 
 		/**
-		 * Auto-registers a {@link ToolCallAdvisor} when tools are configured but no
-		 * {@link ToolAdvisor} is present. Disables the advisor's internal conversation
-		 * history when a {@link BaseChatMemoryAdvisor} with a higher order (i.e.
-		 * downstream in the request direction) is already registered, since that memory
-		 * advisor will handle history for every tool-call iteration.
+		 * Auto-registers a {@link ToolCallingAdvisor} unless auto-registration is
+		 * disabled or a {@link ToolAdvisor} is already present in the chain. The advisor
+		 * is always registered so that tools injected dynamically at runtime (e.g. by
+		 * another advisor) are handled correctly even when no static tools are configured
+		 * on the call.
 		 * <p>
-		 * {@code streamToolCallResponses} must be pre-configured on the
-		 * {@code toolCallAdvisorBuilder} passed to {@link DefaultChatClient}.
+		 * Disables the advisor's internal conversation history when a
+		 * {@link MemoryAdvisor} with a higher order (i.e. downstream in the request
+		 * direction) is already registered, since that memory advisor will handle history
+		 * for every tool-call iteration.
 		 */
-		private void autoRegisterToolCallAdvisor() {
+		private void autoRegisterToolCallingAdvisor() {
 
 			boolean autoRegisterDisabled = Boolean.FALSE
-				.equals(this.advisorParams.get(ChatClientAttributes.TOOL_CALL_ADVISOR_AUTO_REGISTER.getKey()));
+				.equals(this.advisorParams.get(ChatClientAttributes.TOOL_CALLING_ADVISOR_AUTO_REGISTER.getKey()));
 			if (autoRegisterDisabled) {
 				return;
 			}
 
-			boolean hasTools = !this.toolCallbacks.isEmpty() || !this.toolCallbackProviders.isEmpty()
-					|| hasToolsInChatOptions(this.optionsCustomizer)
-					|| hasToolsInChatOptions(this.chatModel.getOptions());
-			if (!hasTools) {
+			boolean hasToolCallingAdvisor = this.advisors.stream().anyMatch(a -> a instanceof ToolAdvisor);
+			if (hasToolCallingAdvisor) {
 				return;
 			}
 
-			boolean hasToolCallAdvisor = this.advisors.stream().anyMatch(a -> a instanceof ToolAdvisor);
-			if (hasToolCallAdvisor) {
-				return;
-			}
-
-			int configuredOrder = this.toolCallAdvisorBuilder.getAdvisorOrder();
+			int configuredOrder = this.toolCallingAdvisorBuilder.getAdvisorOrder();
 
 			boolean hasDownstreamMemoryAdvisor = this.advisors.stream()
 				.anyMatch(a -> a instanceof MemoryAdvisor && a.getOrder() > configuredOrder);
 
-			this.advisors.add(
-					this.toolCallAdvisorBuilder.copy().conversationHistoryEnabled(!hasDownstreamMemoryAdvisor).build());
-		}
-
-		private static boolean hasToolsInChatOptions(@Nullable Object options) {
-			ToolCallingChatOptions tco = null;
-			if (options instanceof ToolCallingChatOptions direct) {
-				tco = direct;
-			}
-			else if (options instanceof ToolCallingChatOptions.Builder<?> builder) {
-				tco = (ToolCallingChatOptions) builder.build();
-			}
-			return tco != null && ((tco.getToolCallbacks() != null && !tco.getToolCallbacks().isEmpty()));
+			this.advisors.add(this.toolCallingAdvisorBuilder.copy()
+				.conversationHistoryEnabled(!hasDownstreamMemoryAdvisor)
+				.build());
 		}
 
 		private void validateSingleToolAdvisor() {
@@ -1267,28 +1245,6 @@ public class DefaultChatClient implements ChatClient {
 				throw new IllegalStateException("At most one ToolAdvisor is allowed in the advisor chain, but found "
 						+ toolAdvisors.size() + ": [" + names + "]");
 			}
-		}
-
-		/**
-		 * Warns when a {@link MemoryAdvisor} is ordered before (lower order than) a
-		 * {@link ToolAdvisor}. In that configuration the memory advisor is not part of
-		 * the recursive tool-call chain, so tool messages will not be stored between
-		 * iterations and streaming memory updates will not be sequenced correctly.
-		 */
-		private void warnOnMemoryAdvisorOrderMismatch() {
-			this.advisors.stream()
-				.filter(a -> a instanceof ToolAdvisor)
-				.forEach(tca -> this.advisors.stream()
-					.filter(a -> a instanceof MemoryAdvisor && a.getOrder() <= tca.getOrder())
-					.forEach(mem -> {
-						if (logger.isWarnEnabled()) {
-							logger.warn("ChatMemoryAdvisor '" + mem.getName() + "' (order=" + mem.getOrder()
-									+ ") is ordered at or before ToolCallAdvisor '" + tca.getName() + "' (order="
-									+ tca.getOrder() + "). "
-									+ "Memory will not be updated between tool-call iterations. "
-									+ "Set the memory advisor order above " + tca.getOrder() + " to fix this.");
-						}
-					}));
 		}
 
 	}

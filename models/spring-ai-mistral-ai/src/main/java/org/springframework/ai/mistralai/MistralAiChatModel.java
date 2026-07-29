@@ -541,6 +541,20 @@ public class MistralAiChatModel implements ChatModel {
 		return new Builder();
 	}
 
+	/**
+	 * Look at the options of the provided prompt. If none are provided, return a new
+	 * prompt using this model {@link ChatModel#getOptions() options}. Otherwise, use the
+	 * prompt as is.
+	 */
+	private Prompt buildRequestPrompt(Prompt prompt) {
+		if (prompt.getOptions() == null) {
+			return prompt.mutate().chatOptions(this.getOptions()).build();
+		}
+		else {
+			return prompt;
+		}
+	}
+
 	public static final class Builder {
 
 		private @Nullable MistralAiApi mistralAiApi;
@@ -571,7 +585,7 @@ public class MistralAiChatModel implements ChatModel {
 		 * @param toolCallingManager the tool calling manager
 		 * @return this builder
 		 * @deprecated since 2.0.0 for removal in 3.0.0 — internal tool execution in
-		 * {@link MistralAiChatModel} is superseded by {@code ToolCallAdvisor} used via
+		 * {@link MistralAiChatModel} is superseded by {@code ToolCallingAdvisor} used via
 		 * {@code ChatClient}.
 		 */
 		@Deprecated(since = "2.0.0", forRemoval = true)
